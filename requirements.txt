@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pytest
+httpx
+pydantic
+starlette
+aiofiles
+python-multipart
