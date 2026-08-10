@@ -1,6 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from app.middleware.rate_limiter import RateLimiter
-
+from app.algorithms.sliding_window import SlidingWindowRateLimiter
+from app.algorithms.token_bucket import TokenBucketRateLimiter
+from app.algorithms.leaky_bucket import LeakyBucketRateLimiter
 
 app = FastAPI(
     title="RateGuard",
@@ -8,12 +10,29 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Fixed Window Rate Limiter
+# rate_limiter = RateLimiter(
+#     limit=5,
+#     window=60
+# )
 
-rate_limiter = RateLimiter(
-    limit=5,
-    window=60
+# Sliding Window Rate Limiter
+# rate_limiter = SlidingWindowRateLimiter(
+#     limit=5,
+#     window=60
+# )
+
+# Token Bucket Rate Limiter
+# rate_limiter = TokenBucketRateLimiter(
+#     capacity=10,
+#     refill_rate=2
+# )
+
+# Leaky Bucket Rate Limiter
+rate_limiter = LeakyBucketRateLimiter(
+    capacity=10,
+    leak_rate=2
 )
-
 
 @app.get("/")
 def root():
