@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from app.middleware.rate_limiter import RateLimiter
+from app.algorithms.sliding_window import SlidingWindowRateLimiter
 
 
 app = FastAPI(
@@ -9,11 +10,15 @@ app = FastAPI(
 )
 
 
-rate_limiter = RateLimiter(
+# rate_limiter = RateLimiter(
+#     limit=5,
+#     window=60
+# )
+
+rate_limiter = SlidingWindowRateLimiter(
     limit=5,
     window=60
 )
-
 
 @app.get("/")
 def root():
