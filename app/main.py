@@ -1,44 +1,54 @@
+import os
+
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from app.middleware.rate_limiter import RateLimiter
-from app.algorithms.sliding_window import SlidingWindowRateLimiter
-from app.algorithms.token_bucket import TokenBucketRateLimiter
-from app.algorithms.leaky_bucket import LeakyBucketRateLimiter
+
+from app.algorithms.factory import create_rate_limiter
+
+
+load_dotenv()
+
 
 app = FastAPI(
     title="RateGuard",
     description="API Rate Limiting Gateway",
-    version="1.0.0"
+    version="1.1.0"
 )
 
-# Fixed Window Rate Limiter
-# rate_limiter = RateLimiter(
-#     limit=5,
-#     window=60
-# )
 
-# Sliding Window Rate Limiter
-# rate_limiter = SlidingWindowRateLimiter(
-#     limit=5,
-#     window=60
-# )
-
-# Token Bucket Rate Limiter
-# rate_limiter = TokenBucketRateLimiter(
-#     capacity=10,
-#     refill_rate=2
-# )
-
-# Leaky Bucket Rate Limiter
-rate_limiter = LeakyBucketRateLimiter(
-    capacity=10,
-    leak_rate=2
+algorithm = os.getenv(
+    "RATE_LIMIT_ALGORITHM",
+    "fixed_window"
 )
+
+limit = int(
+    os.getenv(
+        "RATE_LIMIT",
+        "5"
+    )
+)
+
+window = int(
+    os.getenv(
+        "RATE_LIMIT_WINDOW",
+        "60"
+    )
+)
+
+
+rate_limiter = create_rate_limiter(
+    algorithm=algorithm,
+    limit=limit,
+    window=window
+)
+
 
 @app.get("/")
 def root():
     return {
         "message": "RateGuard is running",
-        "version": "1.0.0"
+        "version": "1.1.0",
+        "algorithm": algorithm
     }
 
 
