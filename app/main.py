@@ -23,16 +23,16 @@ app = FastAPI(
 # )
 
 # Token Bucket Rate Limiter
-# rate_limiter = TokenBucketRateLimiter(
-#     capacity=10,
-#     refill_rate=2
-# )
+rate_limiter = TokenBucketRateLimiter(
+    capacity=10,
+    refill_rate=2
+)
 
 # Leaky Bucket Rate Limiter
-rate_limiter = LeakyBucketRateLimiter(
-    capacity=10,
-    leak_rate=2
-)
+# rate_limiter = LeakyBucketRateLimiter(
+#     capacity=10,
+#     leak_rate=2
+# )
 
 @app.get("/")
 def root():
