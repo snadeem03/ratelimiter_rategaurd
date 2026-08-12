@@ -52,7 +52,8 @@ def test_root_endpoint(client):
     assert response.status_code == 200
     assert response.json() == {
         "message": "RateGuard is running",
-        "version": "1.0.0"
+        "version": "1.1.0",
+        "algorithm": "sliding_window"
     }
 
 
