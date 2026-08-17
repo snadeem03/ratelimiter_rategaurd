@@ -1,9 +1,9 @@
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 
-from app.algorithms.factory import create_rate_limiter
+from app.middleware.rate_limiter import RateLimiter
 
 
 load_dotenv()
@@ -18,7 +18,7 @@ app = FastAPI(
 
 algorithm = os.getenv(
     "RATE_LIMIT_ALGORITHM",
-    "fixed_window"
+    "sliding_window"
 )
 
 limit = int(
@@ -35,12 +35,31 @@ window = int(
     )
 )
 
+TRUST_PROXY_HEADERS = os.getenv(
+    "TRUST_PROXY_HEADERS",
+    ""
+).lower() in ("1", "true", "yes")
 
-rate_limiter = create_rate_limiter(
+
+rate_limiter = RateLimiter(
     algorithm=algorithm,
     limit=limit,
     window=window
 )
+
+
+def client_key(request: Request) -> str:
+    api_key = request.headers.get("X-API-Key")
+    if api_key:
+        return f"apikey:{api_key}"
+
+    if TRUST_PROXY_HEADERS:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return f"ip:{forwarded.split(',')[0].strip()}"
+
+    host = request.client.host if request.client else "unknown"
+    return f"ip:{host}"
 
 
 @app.get("/")
@@ -53,18 +72,23 @@ def root():
 
 
 @app.get("/api/test")
-def test_api():
+def test_api(request: Request):
 
-    if not rate_limiter.allow_request():
+    key = client_key(request)
+
+    if not rate_limiter.allow_request(key):
+        retry_after = rate_limiter.reset_time(key)
+
         raise HTTPException(
             status_code=429,
             detail={
                 "error": "Too many requests",
-                "retry_after": rate_limiter.reset_time()
-            }
+                "retry_after": retry_after
+            },
+            headers={"Retry-After": str(retry_after)}
         )
 
     return {
         "message": "Request successful",
-        "remaining": rate_limiter.remaining_requests()
+        "remaining": rate_limiter.remaining_requests(key)
     }

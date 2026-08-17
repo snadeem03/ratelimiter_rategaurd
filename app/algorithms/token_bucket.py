@@ -1,3 +1,4 @@
+import threading
 import time
 
 
@@ -8,10 +9,12 @@ class TokenBucketRateLimiter:
 
         # Start with a full bucket
         self.tokens = float(capacity)
-        self.last_refill_time = time.time()
+        self.last_refill_time = time.monotonic()
+
+        self._lock = threading.Lock()
 
     def _refill(self):
-        current_time = time.time()
+        current_time = time.monotonic()
 
         elapsed_time = current_time - self.last_refill_time
 
@@ -24,27 +27,33 @@ class TokenBucketRateLimiter:
 
         self.last_refill_time = current_time
 
-    def allow_request(self):
-        self._refill()
+    def allow_request(self) -> bool:
+        with self._lock:
+            self._refill()
 
-        if self.tokens < 1:
-            return False
+            if self.tokens < 1:
+                return False
 
-        self.tokens -= 1
+            self.tokens -= 1
 
-        return True
+            return True
 
-    def remaining_requests(self):
-        self._refill()
+    def remaining_requests(self) -> int:
+        with self._lock:
+            self._refill()
 
-        return int(self.tokens)
+            return int(self.tokens)
 
-    def reset_time(self):
-        self._refill()
+    def reset_time(self) -> int:
+        with self._lock:
+            self._refill()
 
-        if self.tokens >= 1:
-            return int(time.time())
+            if self.tokens >= 1:
+                return 0
 
-        seconds_until_token = (1 - self.tokens) / self.refill_rate
+            if self.refill_rate <= 0:
+                return 0
 
-        return int(time.time() + seconds_until_token)
+            seconds_until_token = (1 - self.tokens) / self.refill_rate
+
+            return max(0, int(seconds_until_token))

@@ -1,5 +1,16 @@
+import pytest
+
 from app.core.redis_client import get_redis
 from app.storage.redis_storage import RedisStorage
+
+
+try:
+    get_redis().ping()
+except Exception:
+    pytest.skip(
+        "Redis is not available",
+        allow_module_level=True
+    )
 
 
 def test_storage_set_and_get():

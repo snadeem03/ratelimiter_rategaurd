@@ -18,10 +18,10 @@ class RedisStorage:
     ) -> None:
 
         if expiration is not None:
-            self.client.setex(
+            self.client.set(
                 key,
-                expiration,
-                value
+                value,
+                ex=expiration
             )
         else:
             self.client.set(
