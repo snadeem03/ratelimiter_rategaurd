@@ -67,3 +67,13 @@ class RateLimiter:
 
     def reset_time(self, key: str = "default") -> int:
         return self._get_limiter(key).reset_time()
+
+    def rate_limit_headers(self, key: str = "default") -> dict:
+        """Return standard X-RateLimit-* response headers for a client key."""
+        return {
+            "X-RateLimit-Limit": str(self.limit),
+            "X-RateLimit-Remaining": str(
+                max(0, self.remaining_requests(key))
+            ),
+            "X-RateLimit-Reset": str(self.reset_time(key)),
+        }
