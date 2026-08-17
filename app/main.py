@@ -40,11 +40,35 @@ TRUST_PROXY_HEADERS = os.getenv(
     ""
 ).lower() in ("1", "true", "yes")
 
+RATE_LIMIT_BACKEND = os.getenv(
+    "RATE_LIMIT_BACKEND",
+    "memory"
+).lower().strip()
+
+storage = None
+
+if RATE_LIMIT_BACKEND == "redis":
+    from app.core.redis_client import get_redis
+    from app.storage.redis_storage import RedisStorage
+
+    redis = get_redis()
+
+    try:
+        redis.ping()
+    except Exception as exc:
+        raise RuntimeError(
+            "RATE_LIMIT_BACKEND=redis but Redis is unreachable. "
+            "Check REDIS_URL and that Redis is running."
+        ) from exc
+
+    storage = RedisStorage(redis)
+
 
 rate_limiter = RateLimiter(
     algorithm=algorithm,
     limit=limit,
-    window=window
+    window=window,
+    storage=storage
 )
 
 

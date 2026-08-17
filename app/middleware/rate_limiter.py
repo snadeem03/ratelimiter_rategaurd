@@ -21,12 +21,14 @@ class RateLimiter:
         algorithm: str = "sliding_window",
         max_keys: int = 10_000,
         key_ttl: float = 3_600,
+        storage=None,
     ):
         self.limit = limit
         self.window = window
         self.algorithm = algorithm
         self.max_keys = max_keys
         self.key_ttl = key_ttl
+        self._storage = storage
 
         # key -> (limiter, last_seen_monotonic)
         self._limiters = OrderedDict()
@@ -46,6 +48,8 @@ class RateLimiter:
                 algorithm=self.algorithm,
                 limit=self.limit,
                 window=self.window,
+                storage=self._storage,
+                client_id=key,
             )
 
             self._limiters[key] = (limiter, now)
