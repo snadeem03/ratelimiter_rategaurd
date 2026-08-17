@@ -1,15 +1,20 @@
 from typing import Optional
 
 from app.algorithms.base import RateLimiter
-from app.storage.keys import sliding_window_key
+from app.storage.keys import leaky_bucket_key
 
 
-class RedisSlidingWindowRateLimiter(RateLimiter):
+class RedisLeakyBucketRateLimiter(RateLimiter):
 
     ALLOW_SCRIPT = """
     local key = KEYS[1]
-    local window = tonumber(ARGV[1])
-    local limit = tonumber(ARGV[2])
+    local capacity = tonumber(ARGV[1])
+    local leak_rate = tonumber(ARGV[2])
+
+    local window = 31536000
+    if leak_rate > 0 then
+        window = capacity / leak_rate
+    end
 
     local time = redis.call("TIME")
     local now = tonumber(time[1]) + tonumber(time[2]) / 1000000
@@ -20,7 +25,7 @@ class RedisSlidingWindowRateLimiter(RateLimiter):
 
     local allowed = 0
 
-    if count < limit then
+    if count < capacity then
         local seq = redis.call("INCR", key .. ":seq")
         redis.call("ZADD", key, now, tostring(now) .. ":" .. tostring(seq))
         allowed = 1
@@ -30,13 +35,13 @@ class RedisSlidingWindowRateLimiter(RateLimiter):
     redis.call("PEXPIRE", key, ttl_ms)
     redis.call("PEXPIRE", key .. ":seq", ttl_ms)
 
-    local remaining = limit - count - allowed
+    local remaining = capacity - count - allowed
     if remaining < 0 then
         remaining = 0
     end
 
     local reset_in = 0
-    if count >= limit then
+    if count >= capacity then
         local oldest = redis.call("ZRANGE", key, 0, 0, "WITHSCORES")
         if oldest[2] then
             reset_in = math.ceil((oldest[2] + window) - now)
@@ -51,8 +56,13 @@ class RedisSlidingWindowRateLimiter(RateLimiter):
 
     READ_SCRIPT = """
     local key = KEYS[1]
-    local window = tonumber(ARGV[1])
-    local limit = tonumber(ARGV[2])
+    local capacity = tonumber(ARGV[1])
+    local leak_rate = tonumber(ARGV[2])
+
+    local window = 31536000
+    if leak_rate > 0 then
+        window = capacity / leak_rate
+    end
 
     local time = redis.call("TIME")
     local now = tonumber(time[1]) + tonumber(time[2]) / 1000000
@@ -61,13 +71,13 @@ class RedisSlidingWindowRateLimiter(RateLimiter):
 
     local count = redis.call("ZCARD", key)
 
-    local remaining = limit - count
+    local remaining = capacity - count
     if remaining < 0 then
         remaining = 0
     end
 
     local reset_in = 0
-    if count >= limit then
+    if count >= capacity then
         local oldest = redis.call("ZRANGE", key, 0, 0, "WITHSCORES")
         if oldest[2] then
             reset_in = math.ceil((oldest[2] + window) - now)
@@ -84,15 +94,15 @@ class RedisSlidingWindowRateLimiter(RateLimiter):
         self,
         storage,
         client_id: str,
-        limit: int,
-        window: int
+        capacity: int,
+        leak_rate: float
     ):
         self.storage = storage
         self.client_id = client_id
-        self.limit = limit
-        self.window = window
+        self.capacity = capacity
+        self.leak_rate = leak_rate
 
-        self.key = sliding_window_key(client_id)
+        self.key = leaky_bucket_key(client_id)
 
         self.redis_client = storage.client
 
@@ -111,7 +121,7 @@ class RedisSlidingWindowRateLimiter(RateLimiter):
 
         result = self._allow_script(
             keys=[self.key],
-            args=[self.window, self.limit]
+            args=[self.capacity, self.leak_rate]
         )
 
         self._cached_remaining = int(result[1])
@@ -126,7 +136,7 @@ class RedisSlidingWindowRateLimiter(RateLimiter):
 
         result = self._read_script(
             keys=[self.key],
-            args=[self.window, self.limit]
+            args=[self.capacity, self.leak_rate]
         )
 
         return int(result[0])
@@ -138,7 +148,7 @@ class RedisSlidingWindowRateLimiter(RateLimiter):
 
         result = self._read_script(
             keys=[self.key],
-            args=[self.window, self.limit]
+            args=[self.capacity, self.leak_rate]
         )
 
         return int(result[1])

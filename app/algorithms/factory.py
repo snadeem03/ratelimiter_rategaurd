@@ -5,6 +5,7 @@ from app.algorithms.leaky_bucket import LeakyBucketRateLimiter
 from app.algorithms.redis_fixed_window import RedisFixedWindowRateLimiter
 from app.algorithms.redis_sliding_window import RedisSlidingWindowRateLimiter
 from app.algorithms.redis_token_bucket import RedisTokenBucketRateLimiter
+from app.algorithms.redis_leaky_bucket import RedisLeakyBucketRateLimiter
 
 def create_rate_limiter(
     algorithm: str,
@@ -39,6 +40,14 @@ def create_rate_limiter(
                 client_id=client_id,
                 capacity=limit,
                 refill_rate=limit/window
+            )
+
+        if algorithm == "leaky_bucket":
+            return RedisLeakyBucketRateLimiter(
+                storage=storage,
+                client_id=client_id,
+                capacity=limit,
+                leak_rate=limit/window
             )
 
         raise ValueError(

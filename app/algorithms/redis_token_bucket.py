@@ -1,4 +1,3 @@
-import time
 from typing import Optional
 
 import redis
@@ -13,8 +12,10 @@ class RedisTokenBucketRateLimiter(RateLimiter):
 
     local capacity = tonumber(ARGV[1])
     local refill_rate = tonumber(ARGV[2])
-    local now = tonumber(ARGV[3])
-    local ttl_ms = tonumber(ARGV[4])
+    local ttl_ms = tonumber(ARGV[3])
+
+    local time = redis.call("TIME")
+    local now = tonumber(time[1]) + tonumber(time[2]) / 1000000
 
     local data = redis.call("HMGET", key, "tokens", "last_refill")
 
@@ -102,14 +103,11 @@ class RedisTokenBucketRateLimiter(RateLimiter):
 
     def allow_request(self) -> bool:
 
-        now = time.time()
-
         result = self.script(
             keys=[self.key],
             args=[
                 self.capacity,
                 self.refill_rate,
-                now,
                 self.ttl * 1000
             ]
         )

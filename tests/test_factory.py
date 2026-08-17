@@ -8,6 +8,7 @@ from app.algorithms.leaky_bucket import LeakyBucketRateLimiter
 from app.algorithms.redis_fixed_window import RedisFixedWindowRateLimiter
 from app.algorithms.redis_sliding_window import RedisSlidingWindowRateLimiter
 from app.algorithms.redis_token_bucket import RedisTokenBucketRateLimiter
+from app.algorithms.redis_leaky_bucket import RedisLeakyBucketRateLimiter
 
 
 def test_fixed_window_factory():
@@ -102,9 +103,22 @@ def test_redis_token_bucket_factory():
     )
 
 
+def test_redis_leaky_bucket_factory():
+    limiter = create_rate_limiter(
+        "leaky_bucket",
+        storage=redis_storage(),
+        client_id="factory-redis-lb"
+    )
+
+    assert isinstance(
+        limiter,
+        RedisLeakyBucketRateLimiter
+    )
+
+
 def test_redis_unsupported_algorithm():
     with pytest.raises(ValueError):
         create_rate_limiter(
-            "leaky_bucket",
+            "something_random",
             storage=redis_storage()
         )
