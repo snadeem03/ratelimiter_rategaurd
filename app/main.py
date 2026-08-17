@@ -2,6 +2,7 @@ import os
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from app.middleware.rate_limiter import RateLimiter
 
@@ -100,19 +101,29 @@ def test_api(request: Request):
 
     key = client_key(request)
 
-    if not rate_limiter.allow_request(key):
-        retry_after = rate_limiter.reset_time(key)
+    allowed = rate_limiter.allow_request(key)
+
+    headers = rate_limiter.rate_limit_headers(key)
+
+    if not allowed:
+        retry_after = headers["X-RateLimit-Reset"]
 
         raise HTTPException(
             status_code=429,
             detail={
                 "error": "Too many requests",
-                "retry_after": retry_after
+                "retry_after": int(retry_after)
             },
-            headers={"Retry-After": str(retry_after)}
+            headers={
+                **headers,
+                "Retry-After": retry_after
+            }
         )
 
-    return {
-        "message": "Request successful",
-        "remaining": rate_limiter.remaining_requests(key)
-    }
+    return JSONResponse(
+        content={
+            "message": "Request successful",
+            "remaining": int(headers["X-RateLimit-Remaining"])
+        },
+        headers=headers
+    )
