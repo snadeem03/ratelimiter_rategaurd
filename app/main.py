@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.config import parse_route_limits
 from app.middleware.rate_limiter import RateLimiter
 
 
@@ -46,6 +47,10 @@ RATE_LIMIT_BACKEND = os.getenv(
     "memory"
 ).lower().strip()
 
+route_limits = parse_route_limits(
+    os.getenv("RATE_LIMIT_ROUTES", "")
+)
+
 storage = None
 
 if RATE_LIMIT_BACKEND == "redis":
@@ -69,7 +74,8 @@ rate_limiter = RateLimiter(
     algorithm=algorithm,
     limit=limit,
     window=window,
-    storage=storage
+    storage=storage,
+    route_limits=route_limits
 )
 
 
@@ -87,23 +93,16 @@ def client_key(request: Request) -> str:
     return f"ip:{host}"
 
 
-@app.get("/")
-def root():
-    return {
-        "message": "RateGuard is running",
-        "version": "1.1.0",
-        "algorithm": algorithm
-    }
+def _enforce_rate_limit(request: Request, route: str) -> dict:
+    """Check the rate limit for a client on a route and return headers.
 
-
-@app.get("/api/test")
-def test_api(request: Request):
-
+    Raises HTTPException(429) with Retry-After when over the limit.
+    """
     key = client_key(request)
 
-    allowed = rate_limiter.allow_request(key)
+    allowed = rate_limiter.allow_request(key, route=route)
 
-    headers = rate_limiter.rate_limit_headers(key)
+    headers = rate_limiter.rate_limit_headers(key, route=route)
 
     if not allowed:
         retry_after = headers["X-RateLimit-Reset"]
@@ -120,9 +119,64 @@ def test_api(request: Request):
             }
         )
 
+    return headers
+
+
+@app.get("/")
+def root():
+    return {
+        "message": "RateGuard is running",
+        "version": "1.1.0",
+        "algorithm": algorithm
+    }
+
+
+@app.get("/api/test")
+def test_api(request: Request):
+    headers = _enforce_rate_limit(request, route="/api/test")
+
     return JSONResponse(
         content={
             "message": "Request successful",
+            "remaining": int(headers["X-RateLimit-Remaining"])
+        },
+        headers=headers
+    )
+
+
+@app.post("/api/login")
+def login(request: Request):
+    headers = _enforce_rate_limit(request, route="/api/login")
+
+    return JSONResponse(
+        content={
+            "message": "Login successful",
+            "remaining": int(headers["X-RateLimit-Remaining"])
+        },
+        headers=headers
+    )
+
+
+@app.get("/api/products")
+def products(request: Request):
+    headers = _enforce_rate_limit(request, route="/api/products")
+
+    return JSONResponse(
+        content={
+            "message": "Products fetched",
+            "remaining": int(headers["X-RateLimit-Remaining"])
+        },
+        headers=headers
+    )
+
+
+@app.post("/api/orders")
+def orders(request: Request):
+    headers = _enforce_rate_limit(request, route="/api/orders")
+
+    return JSONResponse(
+        content={
+            "message": "Order created",
             "remaining": int(headers["X-RateLimit-Remaining"])
         },
         headers=headers
