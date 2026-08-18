@@ -36,6 +36,15 @@ Routes not listed in `RATE_LIMIT_ROUTES` fall back to the global `RATE_LIMIT` an
 
 Limits are still enforced **per client**: the effective key is `route + client`, so the limit for `/api/login` never interferes with `/api/products`, and two clients never share a budget. With the Redis backend the key is `rateguard:{algorithm}:{route}:{client}`, so limits stay correct across uvicorn workers.
 
+## Leaky bucket (Redis backend)
+
+Select the distributed leaky bucket with `RATE_LIMIT_ALGORITHM=leaky_bucket` and `RATE_LIMIT_BACKEND=redis`. The bucket is stored in Redis so all uvicorn workers share the same state:
+
+- **State** — admitted requests live in a sorted set per `rateguard:leaky_bucket:{route}:{client}` key; a per-bucket counter (`:seq`) keeps members unique and a `:last_leak` timestamp drives the drain. Timestamps come from `redis.call("TIME")` (the Redis server clock), so workers agree regardless of client clock skew.
+- **Leak rate** — the bucket drains `limit / RATE_LIMIT_WINDOW` requests per second in FIFO order (one slot frees every `RATE_LIMIT_WINDOW / limit` seconds). Bursts up to `capacity` pass immediately; a full bucket rejects with `429` until the next slot drains.
+- **Atomicity** — admission and leak run in a single Lua script, so concurrent requests cannot oversubscribe the last slot.
+- **Expiry** — every state key gets a TTL equal to the full-drain time (`capacity / leak_rate`, refreshed on each request), so buckets abandoned by idle clients never linger in Redis.
+
 ## API keys
 
 RateGuard can authenticate clients with API keys sent via the `X-API-Key` header.
