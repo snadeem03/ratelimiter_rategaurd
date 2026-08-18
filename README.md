@@ -10,7 +10,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload            # http://127.0.0.1:8000
 ```
 
-Configurable via `.env`: `RATE_LIMIT_ALGORITHM`, `RATE_LIMIT`, `RATE_LIMIT_WINDOW`, `RATE_LIMIT_ROUTES`, `RATE_LIMIT_BACKEND` (`memory` | `redis`), `TRUST_PROXY_HEADERS`, `REDIS_URL`, and Redis timeouts.
+Configurable via `.env`: `RATE_LIMIT_ALGORITHM`, `RATE_LIMIT`, `RATE_LIMIT_WINDOW`, `RATE_LIMIT_ROUTES`, `RATE_LIMIT_BACKEND` (`memory` | `redis`), `TRUST_PROXY_HEADERS`, `API_KEY_PREFIX`, `API_KEY_STORE_PATH`, `ADMIN_API_TOKEN`, `REDIS_URL`, and Redis timeouts.
 
 ## Endpoints
 
@@ -35,6 +35,68 @@ RATE_LIMIT_ROUTES=/api/test:100:60,/api/login:10:60,/api/products:200:60,/api/or
 Routes not listed in `RATE_LIMIT_ROUTES` fall back to the global `RATE_LIMIT` and `RATE_LIMIT_WINDOW`.
 
 Limits are still enforced **per client**: the effective key is `route + client`, so the limit for `/api/login` never interferes with `/api/products`, and two clients never share a budget. With the Redis backend the key is `rateguard:{algorithm}:{route}:{client}`, so limits stay correct across uvicorn workers.
+
+## API keys
+
+RateGuard can authenticate clients with API keys sent via the `X-API-Key` header.
+
+### How keys work
+
+- Keys are generated with a cryptographically secure RNG and carry a `rg_live_` prefix (configurable via `API_KEY_PREFIX`).
+- Only a **SHA-256 digest** of the key is stored; the plaintext key is shown exactly once, at creation time, and is never logged or returned by any list/get endpoint.
+- The rate-limit identity for a key is its stable **client identity**: the key's `owner` if set, otherwise its digest. Two keys with different owners get independent quotas; two keys sharing an `owner` share a quota.
+
+```powershell
+# create a key
+curl -X POST http://127.0.0.1:8000/admin/api-keys `
+  -H "Content-Type: application/json" `
+  -d '{"name":"my-app","owner":"acme"}'
+
+# response (the only time the secret is shown)
+# {"key":"rg_live_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX","id":"...","name":"my-app","enabled":true,"owner":"acme","created_at":"...","expires_at":null}
+```
+
+### Usage
+
+```http
+GET /api/products HTTP/1.1
+X-API-Key: rg_live_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+```
+
+### Authentication behavior
+
+- **Valid, enabled, non-expired key** → used as the primary client identity for rate limiting.
+- **No `X-API-Key` header** → falls back to the client IP (or `X-Forwarded-For` when `TRUST_PROXY_HEADERS=true`). Existing clients that don't use API keys are unaffected.
+- **`X-API-Key` supplied but invalid / disabled / expired** → `401 Unauthorized`. There is no silent IP fallback for an explicitly supplied key that fails validation.
+- Header values that do **not** match the managed `rg_live_` prefix keep the legacy opaque-client behaviour.
+
+### Revocation
+
+All `/admin/api-keys` endpoints are protected by an **admin token**. Set the `ADMIN_API_TOKEN` environment variable and send it with every admin request:
+
+```http
+X-Admin-Token: <your-admin-token>
+```
+
+When `ADMIN_API_TOKEN` is not set, the admin API is disabled and every admin request is rejected with `403` — nothing is publicly accessible by default. The token is compared in constant time and is never logged or returned by any endpoint.
+
+```powershell
+# disable a key (it can no longer authenticate)
+curl -X POST http://127.0.0.1:8000/admin/api-keys/{id}/revoke -H "X-Admin-Token: $env:ADMIN_API_TOKEN"
+
+# permanently delete a key
+curl -X DELETE http://127.0.0.1:8000/admin/api-keys/{id} -H "X-Admin-Token: $env:ADMIN_API_TOKEN"
+
+# list key metadata (never includes the secret)
+curl http://127.0.0.1:8000/admin/api-keys -H "X-Admin-Token: $env:ADMIN_API_TOKEN"
+```
+
+The key `id` is an opaque identifier returned by `POST /admin/api-keys` and `GET /admin/api-keys`; it is not the secret and cannot be used to authenticate.
+
+### Storage
+
+- Default (memory backend): a local JSON file at `API_KEY_STORE_PATH` (default `api_keys.json`, gitignored). Set `API_KEY_STORE_PATH` to relocate it.
+- Redis backend (`RATE_LIMIT_BACKEND=redis`): keys are stored in Redis hashes (`rateguard:apikey:{hash}`) so they work across uvicorn workers.
 
 ## Rate limit response headers
 
