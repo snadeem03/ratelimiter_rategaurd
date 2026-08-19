@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from app.api_keys import ApiKeyStore, RedisApiKeyStore
 from app.config import parse_route_limits
 from app.middleware.rate_limiter import RateLimiter
+from app.middleware.rate_limit_middleware import RateLimitMiddleware
 
 
 load_dotenv()
@@ -53,6 +54,8 @@ RATE_LIMIT_BACKEND = os.getenv(
 route_limits = parse_route_limits(
     os.getenv("RATE_LIMIT_ROUTES", "")
 )
+
+EXCLUDED_PATHS = {"/", "/docs", "/redoc", "/openapi.json"}
 
 API_KEY_PREFIX = os.getenv(
     "API_KEY_PREFIX",
@@ -143,33 +146,11 @@ def client_key(request: Request) -> str:
     return f"ip:{host}"
 
 
-def _enforce_rate_limit(request: Request, route: str) -> dict:
-    """Check the rate limit for a client on a route and return headers.
-
-    Raises HTTPException(429) with Retry-After when over the limit.
-    """
-    key = client_key(request)
-
-    allowed = rate_limiter.allow_request(key, route=route)
-
-    headers = rate_limiter.rate_limit_headers(key, route=route)
-
-    if not allowed:
-        retry_after = headers["X-RateLimit-Reset"]
-
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "error": "Too many requests",
-                "retry_after": int(retry_after)
-            },
-            headers={
-                **headers,
-                "Retry-After": retry_after
-            }
-        )
-
-    return headers
+def _remaining(request: Request) -> int:
+    """Return the remaining allowance recorded by the middleware."""
+    return int(
+        request.state.rate_limit_headers["X-RateLimit-Remaining"]
+    )
 
 
 @app.get("/")
@@ -183,53 +164,41 @@ def root():
 
 @app.get("/api/test")
 def test_api(request: Request):
-    headers = _enforce_rate_limit(request, route="/api/test")
-
     return JSONResponse(
         content={
             "message": "Request successful",
-            "remaining": int(headers["X-RateLimit-Remaining"])
-        },
-        headers=headers
+            "remaining": _remaining(request)
+        }
     )
 
 
 @app.post("/api/login")
 def login(request: Request):
-    headers = _enforce_rate_limit(request, route="/api/login")
-
     return JSONResponse(
         content={
             "message": "Login successful",
-            "remaining": int(headers["X-RateLimit-Remaining"])
-        },
-        headers=headers
+            "remaining": _remaining(request)
+        }
     )
 
 
 @app.get("/api/products")
 def products(request: Request):
-    headers = _enforce_rate_limit(request, route="/api/products")
-
     return JSONResponse(
         content={
             "message": "Products fetched",
-            "remaining": int(headers["X-RateLimit-Remaining"])
-        },
-        headers=headers
+            "remaining": _remaining(request)
+        }
     )
 
 
 @app.post("/api/orders")
 def orders(request: Request):
-    headers = _enforce_rate_limit(request, route="/api/orders")
-
     return JSONResponse(
         content={
             "message": "Order created",
-            "remaining": int(headers["X-RateLimit-Remaining"])
-        },
-        headers=headers
+            "remaining": _remaining(request)
+        }
     )
 
 
@@ -316,3 +285,12 @@ def delete_api_key(key_id: str):
             status_code=404,
             detail="API key not found"
         )
+
+
+app.add_middleware(
+    RateLimitMiddleware,
+    client_key_fn=client_key,
+    get_rate_limiter=lambda: rate_limiter,
+    excluded_paths=EXCLUDED_PATHS,
+    route_limits=route_limits,
+)
