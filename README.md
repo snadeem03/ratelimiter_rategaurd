@@ -2,6 +2,24 @@
 
 A rate-limiting service built with **FastAPI + Redis**. It throttles clients using pluggable algorithms — **fixed window, sliding window, token bucket, leaky bucket** — each available with an in-memory (`memory`) or shared Redis (`redis`) backend. Rate limits are enforced per client (keyed by `X-API-Key` or client IP).
 
+## Architecture
+
+Rate-limit enforcement happens once, in a reusable **ASGI middleware layer** (`app/middleware/rate_limit_middleware.py`), before requests reach the endpoints. Endpoints no longer call the limiter themselves — the middleware is the single enforcement point:
+
+```
+ASGI Middleware (RateLimitMiddleware)
+      ↓
+Client / route resolution      # API-key / IP identity + request path
+      ↓
+RateLimiter facade             # per-(route, client) algorithm instances
+      ↓
+Algorithm                      # fixed/sliding window, token/leaky bucket
+      ↓
+Memory OR Redis backend        # atomic Lua scripts shared across uvicorn workers
+```
+
+The middleware inspects each HTTP request, resolves the client identity (`X-API-Key` or IP), applies the configured per-route limit (or the global fallback), and rejects over-limit requests with `429`. Every allowed response automatically receives the standard `X-RateLimit-*` headers, and over-limit responses include `Retry-After`. The root, docs, and OpenAPI paths (`/`, `/docs`, `/redoc`, `/openapi.json`) and the admin API (`/admin/...`) are never rate-limited.
+
 ## Run
 
 ```powershell
