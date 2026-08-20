@@ -5,3 +5,4 @@ __pycache__/
 .env
 CONTEXT.md
 api_keys.json
+benchmark/results/

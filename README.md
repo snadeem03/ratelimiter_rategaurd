@@ -142,3 +142,98 @@ When a client exceeds its limit the API responds with `429 Too Many Requests` an
 - the same `X-RateLimit-*` headers (`X-RateLimit-Remaining` is `0`, never negative),
 - an RFC 6585 `Retry-After` header set to the same value as `X-RateLimit-Reset` (seconds until a request will be allowed again),
 - the reset value also in the response body as `detail.retry_after`.
+
+## Benchmarking
+
+The `benchmark/` package measures the four rate-limiting algorithms on both
+backends. It drives the **real** limiter implementations (no mocks) and saves
+results to `benchmark/results/` (CSV + JSON).
+
+```powershell
+# in-memory benchmark of all four algorithms (burst traffic)
+python -m benchmark.benchmark
+
+# Redis-backed benchmark, all algorithms
+python -m benchmark.benchmark --backend redis
+
+# both backends, three traffic patterns, concurrency 1 / 10 / 50
+python -m benchmark.benchmark --backend both --traffic all --concurrency 1,10,50
+
+# a single scenario
+python -m benchmark.benchmark --backend redis --algorithm token_bucket --traffic burst --requests 1000 --concurrency 10
+```
+
+### Flags
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--backend` | `memory` | `memory`, `redis`, or `both` |
+| `--algorithm` | `all` | `all` or `fixed_window`, `sliding_window`, `token_bucket`, `leaky_bucket` |
+| `--traffic` | `burst` | `all`, `normal`, `burst`, or `sustained` |
+| `--requests` | `1000` | total requests per scenario |
+| `--concurrency` | `1` | comma-separated worker counts, or `all` for `1,10,50` |
+| `--limit` / `--window` | `100` / `60` | the rate-limit configuration applied to every algorithm |
+| `--interval` | auto | seconds between requests for paced traffic |
+| `--redis-url` | env | override `REDIS_URL` |
+| `--format` | `all` | `table` (print only), `csv`, `json`, or `all` |
+
+### Traffic patterns
+
+- **burst** — rapid-fire requests with no spacing; the limit is hit immediately
+  and subsequent requests are rejected.
+- **normal** — requests spaced at *half* the sustainable rate
+  (`window / limit * 2` seconds), so nearly everything is allowed.
+- **sustained** — requests paced right at the sustainable rate
+  (`window / limit` seconds), producing a mix of allowed and rejected.
+
+For paced patterns each run takes roughly `requests * interval` seconds;
+use smaller `--requests` or set `--interval` explicitly to keep runs short.
+
+### Concurrency
+
+`--concurrency 1,10,50` runs each scenario with 1, 10, and 50 concurrent
+workers. These are **benchmark scenarios, not universally representative
+deployments**:
+
+- memory backend: all workers share one limiter instance (lock contention).
+- Redis backend: each worker gets its own limiter instance but they share the
+  same Redis keys, mirroring a multi-worker uvicorn deployment. Results include
+  Redis connection-pool and Lua-script contention.
+
+### Correctness before measurement
+
+Before timing, every scenario verifies on a fresh limiter that exactly
+`limit` requests pass and the next ones are rejected, so the benchmark never
+bypasses the configured limit. Burst runs additionally assert the total
+allowed requests never exceed `limit`.
+
+### Measured metrics
+
+| Metric | Meaning |
+| ------ | ------- |
+| `Requests` / `Allowed` / `Rejected` | request totals |
+| `RPS` | requests per second over wall-clock elapsed time |
+| `Avg / P50 / P95 / P99 (ms)` | per-request `allow_request()` latency percentiles |
+
+### Redis isolation
+
+Every run uses unique keys (`rateguard:{algorithm}:bench:{run_id}:...`) and
+deletes them afterwards, so no state leaks between scenarios or runs.
+
+### Redis availability
+
+- `--backend redis` with no reachable server **fails clearly** (exit code 1).
+- `--backend both` with no reachable server prints an explicit message and runs
+  memory-only. There is no silent fallback for an explicitly requested Redis
+  benchmark.
+
+### Caveats
+
+Comparisons are only indicative, not authoritative:
+
+- Algorithm semantics differ (fixed window re-opens each window, sliding window
+  is continuous, token bucket refills continuously, leaky bucket drains FIFO).
+- Redis results include network round-trips and connection-pool effects.
+- **Results depend on your machine, Python version, and Redis deployment**
+  (single-node vs clustered, network latency, CPU). Treat numbers as relative
+  comparisons on the same host, not absolute guarantees.
