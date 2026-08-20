@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RateGuard Playground</title>
+  <link rel="stylesheet" href="/playground/style.css">
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">RG</span>
+      <h1>RateGuard <span class="brand-sub">Playground</span></h1>
+    </div>
+    <div class="topbar-status">
+      <span id="server-info" class="pill" title="RateGuard server connected">server&hellip;</span>
+      <span id="redis-badge" class="pill">Redis&hellip;</span>
+      <span id="mode-badge" class="pill pill-mode">Simulation</span>
+    </div>
+  </header>
+
+  <div class="layout">
+
+    <aside class="panel controls">
+      <h2>Controls</h2>
+
+      <div class="field-group">
+        <label>Mode</label>
+        <div class="segmented" id="mode-switch">
+          <button class="seg active" data-mode="simulation">Simulation</button>
+          <button class="seg" data-mode="live">Live API</button>
+        </div>
+        <p id="mode-note" class="field-note">Runs the real RateGuard algorithms in memory. No server config needed.</p>
+      </div>
+
+      <div class="field-group">
+        <label for="algorithm-select">Algorithm</label>
+        <div class="segmented" id="algorithm-select">
+          <button class="seg active" data-algo="fixed_window">Fixed Window</button>
+          <button class="seg" data-algo="sliding_window">Sliding Window</button>
+          <button class="seg" data-algo="token_bucket">Token Bucket</button>
+          <button class="seg" data-algo="leaky_bucket">Leaky Bucket</button>
+        </div>
+        <p class="field-note" id="algo-note"></p>
+      </div>
+
+      <div class="field-group">
+        <label>Backend</label>
+        <div class="segmented" id="backend-select">
+          <button class="seg active" data-backend="memory">Memory</button>
+          <button class="seg" data-backend="redis">Redis</button>
+        </div>
+        <p class="field-note" id="backend-note"></p>
+      </div>
+
+      <div class="field-group row">
+        <div class="col">
+          <label for="limit">Limit</label>
+          <input id="limit" type="number" min="1" max="1000" value="10">
+        </div>
+        <div class="col">
+          <label for="window">Window (s)</label>
+          <input id="window" type="number" min="1" max="3600" value="60">
+        </div>
+      </div>
+
+      <div class="field-group">
+        <label for="client-id" id="client-id-label">Client ID</label>
+        <input id="client-id" type="text" value="client-1" autocomplete="off" spellcheck="false">
+        <p class="field-note" id="client-id-note">Identity used to key the rate limit.</p>
+      </div>
+
+      <div class="field-group">
+        <label for="route">Route</label>
+        <select id="route">
+          <option value="/api/test" data-method="GET">GET /api/test</option>
+          <option value="/api/login" data-method="POST">POST /api/login</option>
+          <option value="/api/products" data-method="GET">GET /api/products</option>
+          <option value="/api/orders" data-method="POST">POST /api/orders</option>
+        </select>
+      </div>
+
+      <div class="field-group live-only hidden">
+        <label for="api-base">API base URL</label>
+        <input id="api-base" type="text" value="" placeholder="http://127.0.0.1:8000" spellcheck="false">
+        <p class="field-note">Leave empty to use this same server (no CORS needed).</p>
+      </div>
+
+      <div class="field-group">
+        <label>Traffic</label>
+        <div class="traffic-buttons">
+          <button id="send-1" class="btn" type="button">Send 1</button>
+          <button id="send-5" class="btn" type="button">Send 5</button>
+          <button id="send-burst" class="btn" type="button" title="Overshoots the limit">Burst</button>
+        </div>
+        <div class="traffic-buttons">
+          <button id="auto-start" class="btn btn-accent" type="button">Start auto</button>
+          <button id="auto-stop" class="btn" type="button" disabled>Stop auto</button>
+          <button id="reset" class="btn btn-danger" type="button">Reset</button>
+        </div>
+        <div class="traffic-row">
+          <label for="auto-speed">Speed</label>
+          <select id="auto-speed">
+            <option value="1200">Slow</option>
+            <option value="500" selected>Medium</option>
+            <option value="150">Fast</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="live-config" class="live-config hidden">
+        <h3>Live server configuration</h3>
+        <dl class="config-dl">
+          <div><dt>Algorithm</dt><dd id="lc-algorithm">&mdash;</dd></div>
+          <div><dt>Backend</dt><dd id="lc-backend">&mdash;</dd></div>
+          <div><dt>Limit</dt><dd id="lc-limit">&mdash;</dd></div>
+          <div><dt>Window</dt><dd id="lc-window">&mdash;</dd></div>
+          <div><dt>Route limit</dt><dd id="lc-route-limit">&mdash;</dd></div>
+          <div><dt>Redis</dt><dd id="lc-redis">&mdash;</dd></div>
+        </dl>
+        <p class="field-note">Live requests use the running server's configuration. To change the algorithm, backend, limit or window for the live API, set them in <code>.env</code> and restart RateGuard.</p>
+      </div>
+    </aside>
+
+    <main class="center">
+      <section class="panel metrics" aria-label="Live metrics">
+        <div class="metric"><span class="metric-value" id="m-requests">0</span><span class="metric-label">Requests</span></div>
+        <div class="metric ok"><span class="metric-value" id="m-allowed">0</span><span class="metric-label">Allowed</span></div>
+        <div class="metric bad"><span class="metric-value" id="m-rejected">0</span><span class="metric-label">Rejected</span></div>
+        <div class="metric"><span class="metric-value" id="m-remaining">0</span><span class="metric-label">Remaining</span></div>
+        <div class="metric"><span class="metric-value" id="m-limit">0</span><span class="metric-label">Limit</span></div>
+        <div class="metric"><span class="metric-value" id="m-reset">0</span><span class="metric-label">Reset (s)</span></div>
+        <div class="metric"><span class="metric-value" id="m-rate">0</span><span class="metric-label">Rate (req/s)</span></div>
+        <div class="metric"><span class="metric-value" id="m-success">0%</span><span class="metric-label">Success</span></div>
+      </section>
+
+      <section class="panel viz" aria-label="Algorithm visualization">
+        <div class="viz-head">
+          <h2 id="viz-title">Fixed Window</h2>
+          <span id="viz-subtitle" class="viz-subtitle"></span>
+        </div>
+        <div id="viz-container" class="viz-container"></div>
+      </section>
+
+      <section class="panel flow" aria-label="Request flow">
+        <div class="flow-arrow"><span>Client</span><i>&rarr;</i><span>Middleware</span><i>&rarr;</i><span>Limiter</span><i>&rarr;</i><span>Result</span></div>
+      </section>
+
+      <section class="panel state-readout" aria-label="Current state">
+        <h2>State</h2>
+        <div id="state-readout" class="state-grid"></div>
+      </section>
+    </main>
+
+    <aside class="panel events">
+      <div class="events-head">
+        <h2>Request log</h2>
+        <span id="log-count" class="pill pill-dim">0</span>
+      </div>
+      <div id="event-list" class="event-list" aria-live="polite"></div>
+    </aside>
+
+  </div>
+
+  <script src="/playground/app.js"></script>
+</body>
+</html>

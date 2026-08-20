@@ -1,15 +1,18 @@
 import hmac
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.api_keys import ApiKeyStore, RedisApiKeyStore
 from app.config import parse_route_limits
 from app.middleware.rate_limiter import RateLimiter
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
+from app.playground import simulation as playground_sim
 
 
 load_dotenv()
@@ -66,6 +69,8 @@ API_KEY_STORE_PATH = os.getenv(
     "API_KEY_STORE_PATH",
     "api_keys.json"
 )
+
+PLAYGROUND_STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN")
 
@@ -287,10 +292,170 @@ def delete_api_key(key_id: str):
         )
 
 
+class PlaygroundSimCreate(BaseModel):
+    algorithm: str
+    limit: int = 10
+    window: int = 60
+    backend: str = "memory"
+    client_id: str = "client-1"
+    route: str = "/api/test"
+
+
+class PlaygroundSimRequest(BaseModel):
+    session_id: str
+    count: int = 1
+
+
+class PlaygroundSession(BaseModel):
+    session_id: str
+
+
+def _playground_sim_payload(session):
+    payload = playground_sim.session_payload(session)
+    payload["session_id"] = session.session_id
+    return payload
+
+
+@app.get("/playground/api/config")
+def playground_api_config():
+    """Report the running server's real configuration and Redis
+    reachability. Never exposes credentials or tokens."""
+    redis_ok = False
+
+    try:
+        from app.core.redis_client import get_redis
+        redis_ok = bool(get_redis().ping())
+    except Exception:
+        redis_ok = False
+
+    return {
+        "version": "1.1.0",
+        "algorithm": algorithm,
+        "backend": RATE_LIMIT_BACKEND,
+        "limit": limit,
+        "window": window,
+        "route_limits": route_limits,
+        "api_key_prefix": API_KEY_PREFIX,
+        "trust_proxy_headers": TRUST_PROXY_HEADERS,
+        "redis": {
+            "configured": RATE_LIMIT_BACKEND == "redis",
+            "available": redis_ok,
+        },
+    }
+
+
+@app.post("/playground/sim/session", status_code=201)
+def playground_sim_create(body: PlaygroundSimCreate):
+    """Create a simulation session backed by a real RateGuard limiter."""
+    try:
+        session = playground_sim.create_session(
+            algorithm=body.algorithm,
+            limit=body.limit,
+            window=body.window,
+            backend=body.backend,
+            client_id=body.client_id,
+            route=body.route,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except playground_sim.RedisUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Redis unavailable"},
+        ) from exc
+
+    return _playground_sim_payload(session)
+
+
+@app.post("/playground/sim/request")
+def playground_sim_request(body: PlaygroundSimRequest):
+    """Send ``count`` requests through the session's real limiter."""
+    session = playground_sim.get_session(body.session_id)
+
+    if session is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Simulation session not found",
+        )
+
+    if body.count < 1 or body.count > playground_sim.MAX_BURST:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"count must be between 1 and "
+                f"{playground_sim.MAX_BURST}"
+            ),
+        )
+
+    try:
+        return session.send(body.count)
+    except playground_sim.RedisUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Redis unavailable"},
+        ) from exc
+
+
+@app.get("/playground/sim/state")
+def playground_sim_state(session_id: str):
+    """Read the session's current state without consuming a request."""
+    session = playground_sim.get_session(session_id)
+
+    if session is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Simulation session not found",
+        )
+
+    try:
+        return _playground_sim_payload(session)
+    except playground_sim.RedisUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Redis unavailable"},
+        ) from exc
+
+
+@app.post("/playground/sim/reset")
+def playground_sim_reset(body: PlaygroundSession):
+    """Recreate the session's limiter and clear recorded metrics/events."""
+    session = playground_sim.get_session(body.session_id)
+
+    if session is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Simulation session not found",
+        )
+
+    session.reset()
+
+    try:
+        return _playground_sim_payload(session)
+    except playground_sim.RedisUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Redis unavailable"},
+        ) from exc
+
+
+@app.post("/playground/sim/close")
+def playground_sim_close(body: PlaygroundSession):
+    """Release a simulation session (idempotent)."""
+    playground_sim.close_session(body.session_id)
+    return {"closed": True}
+
+
+app.mount(
+    "/playground",
+    StaticFiles(directory=str(PLAYGROUND_STATIC_DIR), html=True),
+    name="playground",
+)
+
 app.add_middleware(
     RateLimitMiddleware,
     client_key_fn=client_key,
     get_rate_limiter=lambda: rate_limiter,
     excluded_paths=EXCLUDED_PATHS,
     route_limits=route_limits,
+    excluded_prefixes=("/admin", "/playground"),
 )
