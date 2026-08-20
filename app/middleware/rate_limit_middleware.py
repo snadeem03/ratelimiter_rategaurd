@@ -21,16 +21,19 @@ class RateLimitMiddleware:
         get_rate_limiter,
         excluded_paths=None,
         route_limits=None,
+        excluded_prefixes=("/admin",),
     ):
         self.app = app
         self.client_key_fn = client_key_fn
         self.get_rate_limiter = get_rate_limiter
         self.excluded_paths = set(excluded_paths or ())
         self.route_limits = route_limits or {}
+        self.excluded_prefixes = tuple(excluded_prefixes or ())
 
     def _should_limit(self, path):
-        if path == "/admin" or path.startswith("/admin/"):
-            return False
+        for prefix in self.excluded_prefixes:
+            if path == prefix or path.startswith(prefix + "/"):
+                return False
 
         if path in self.excluded_paths:
             return path in self.route_limits

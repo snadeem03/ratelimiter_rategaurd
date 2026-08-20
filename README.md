@@ -237,3 +237,95 @@ Comparisons are only indicative, not authoritative:
 - **Results depend on your machine, Python version, and Redis deployment**
   (single-node vs clustered, network latency, CPU). Treat numbers as relative
   comparisons on the same host, not absolute guarantees.
+
+## RateGuard Playground
+
+A local, interactive playground for visually exploring the **real** RateGuard
+rate-limiting algorithms. It is a developer/testing tool, not a production
+dashboard — no authentication, no remote backend, nothing leaves your machine.
+
+### 1. Start RateGuard
+
+```powershell
+venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn app.main:app --reload        # http://127.0.0.1:8000
+```
+
+Redis is optional for the playground. It is only needed for the **Redis**
+backend options (simulation backend and Redis-backed live API).
+
+### 2. Open the playground
+
+Browse to **http://127.0.0.1:8000/playground**. The page is served by the same
+RateGuard app, so everything runs on your machine with no CORS or external
+services.
+
+### 3. Simulation mode (default)
+
+Simulation drives the **actual RateGuard algorithm implementations** server-side
+through the rate-limiter factory — the browser never re-implements rate
+limiting, so what you see is exactly what the running API enforces.
+
+- Pick an **algorithm**, a **limit** and a **window**; select **Memory** (no
+  Redis needed) or **Redis** (uses the real Redis-backed algorithms; requires a
+  reachable server — otherwise you get **Redis unavailable** and requests fail,
+  there is no silent memory fallback).
+- Choose a **client ID** (the identity that keys the limit) and a **route**.
+- **Send 1**, **Send 5**, or **Burst** (overshoots the limit to show 429s);
+  **Start auto** sends one request on a timer; **Reset** recreates the limiter
+  and clears the log.
+
+Because simulation uses the real algorithms, bursts behave exactly like the
+live API: the configured number of requests pass and the rest are rejected.
+
+### 4. Live API mode
+
+Switch to **Live API** to send real HTTP requests through RateGuard's ASGI
+rate-limit middleware. It reads the `X-RateLimit-Limit`, `X-RateLimit-Remaining`,
+`X-RateLimit-Reset` and `Retry-After` headers from every real response and
+visualizes them, including the real 429 rejection.
+
+- The API base defaults to the same origin (`http://127.0.0.1:8000`); you can
+  point it elsewhere, but then the target must allow CORS.
+- An optional **X-API-Key** is sent on each request. Managed keys
+  (`rg_live_*`) are authenticated against the existing store; any other value
+  acts as an opaque client identity — the same behaviour as the real API. Keys
+  are never persisted, stored in `localStorage`, or logged.
+- Live mode shows the **server's actual configuration** (algorithm, backend,
+  limit, window, per-route limits) read-only. To change it, edit `.env` and
+  restart — the playground never modifies your configuration.
+
+### 5. Memory vs Redis
+
+- **Memory** — per-process limiters (simulation) / whatever the server runs
+  (live).
+- **Redis** — the real Redis-backed implementations shared across workers (live
+  mode requires the server to run `RATE_LIMIT_BACKEND=redis`). A badge in the
+  header always reports Redis reachability; an unavailable Redis is shown as
+  **Redis unavailable**, never silently downgraded.
+
+### 6. Algorithm selection
+
+Each algorithm gets its own visualization:
+
+- **Fixed Window** — a counter with per-request slots, a window progress bar,
+  countdown, and an animated window reset when the window expires.
+- **Sliding Window** — a live timeline; requests appear at "now" and slide left
+  until they pass the expiry boundary and disappear.
+- **Token Bucket** — a bucket that refills continuously (tokens animate back in)
+  and drains one token per allowed request; an empty bucket rejects with a shake.
+- **Leaky Bucket** — a FIFO queue that fills from the top and drains at a
+  constant rate out the bottom; a full bucket rejects at the inlet.
+
+The request flow strip (`Client → Middleware → Limiter → Result`) pulses on every
+request, and the live request log records each event with status, remaining,
+reset, route, client, and full 429 header details.
+
+### 7. What the visualization represents
+
+Every metric is real: remaining, reset, allowed/rejected counts, rate and
+success percentage come from the live algorithm state or the actual response
+headers — nothing is fabricated. Animations respect `prefers-reduced-motion`
+and are purely presentational; the underlying numbers always come from
+RateGuard itself.
