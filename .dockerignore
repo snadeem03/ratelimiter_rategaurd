@@ -1,0 +1,17 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+api_keys.json
+benchmark
+benchmark/results
+.env
+.env.*
+!.env.example
+CONTEXT.md
+Dockerfile
+docker-compose.yml
+tests
+*.md
