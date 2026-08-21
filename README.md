@@ -40,7 +40,7 @@ docker compose up --build
 
 Then open:
 
-- **http://localhost:8000** — the API (`GET /` health/info)
+- **http://localhost:8000** — the API (`GET /` health/info, `GET /metrics` Prometheus metrics)
 - **http://localhost:8000/playground** — the interactive RateGuard Playground
 - **http://localhost:8000/docs** — OpenAPI docs
 
@@ -86,6 +86,7 @@ docker compose logs -f redis      # redis only
 ## Endpoints
 
 - `GET /` — health/info
+- `GET /metrics` — Prometheus metrics (never rate-limited)
 - `GET /api/test` — rate-limited test endpoint
 - `POST /api/login` — rate-limited login endpoint
 - `GET /api/products` — rate-limited products endpoint
@@ -195,6 +196,60 @@ When a client exceeds its limit the API responds with `429 Too Many Requests` an
 - the same `X-RateLimit-*` headers (`X-RateLimit-Remaining` is `0`, never negative),
 - an RFC 6585 `Retry-After` header set to the same value as `X-RateLimit-Reset` (seconds until a request will be allowed again),
 - the reset value also in the response body as `detail.retry_after`.
+
+## Observability / Metrics
+
+RateGuard exposes **Prometheus-compatible metrics** at:
+
+```
+GET /metrics
+```
+
+The endpoint is never rate-limited and does not consume any client's budget.
+
+### Available metrics
+
+| Metric | Type | Labels | Description |
+| ------ | ---- | ------ | ----------- |
+| `rateguard_http_requests_total` | counter | `route`, `status` | Total HTTP requests processed, by route and HTTP status code |
+| `rateguard_rate_limit_requests_total` | counter | `decision`, `algorithm`, `backend`, `route` | Rate-limit decisions; `decision="allowed"` vs `decision="rejected"` (429s) |
+| `rateguard_http_request_duration_seconds` | histogram | `route` | Request latency, measured by the ASGI middleware when the response completes (no response buffering); exposes `_count`, `_sum`, `_bucket` |
+
+Derived queries: requests by algorithm/backend/route are the `rateguard_rate_limit_requests_total` label combinations; the rejection count is `decision="rejected"`; per-status totals come from the `status` label. Standard `prometheus_client` process metrics (`python_*`, `process_*`) are also exposed.
+
+### Labels and cardinality
+
+Labels are strictly bounded to prevent cardinality explosions:
+
+- `algorithm` — one of `fixed_window`, `sliding_window`, `token_bucket`, `leaky_bucket`
+- `backend` — `memory` or `redis`
+- `decision` — `allowed` or `rejected`
+- `route` — only known/configured routes (`/api/test`, `/api/login`, `/api/products`, `/api/orders`, `/`, `/metrics`, plus anything listed in `RATE_LIMIT_ROUTES`); every other path is aggregated under the single value `other`
+- `status` — the HTTP status code (plus `error` if a response never started)
+
+**API keys, client identities, IP addresses, session IDs and arbitrary request parameters are never used as metric labels**, and no per-client time series exist. Unknown paths cannot create new label values.
+
+### Process-local vs multi-worker aggregation
+
+Counters live in each worker process (`prometheus_client` default registry):
+
+- **Single worker** (`uvicorn app.main:app`) — `/metrics` is fully accurate.
+- **Multiple workers** — by default `/metrics` returns whichever worker happened to serve that scrape; counters are honest but *worker-local*, not globally aggregated.
+- **Aggregated multi-worker mode** — set `PROMETHEUS_MULTIPROC_DIR` to a writable directory and `prometheus_client`'s [multiprocess mode](https://prometheus.github.io/client_python/multiprocess/) merges all workers of the container at scrape time. The provided `docker-compose.yml` enables this (`PROMETHEUS_MULTIPROC_DIR=/tmp/rateguard_metrics`).
+
+Metrics collection adds **no Redis round-trips**: nothing about a request is written to Redis for monitoring purposes, so the rate-limit hot path is unaffected.
+
+### Scraping with Prometheus
+
+```yaml
+scrape_configs:
+  - job_name: rategaurd
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["rategaurd-host:8000"]
+```
+
+For multiple replicas scrape each instance; for one container running several uvicorn workers use the multiprocess mode above so a single scrape sees all workers. No Prometheus/Grafana containers ship with this repository — point your own scraper at the port.
 
 ## Benchmarking
 
