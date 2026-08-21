@@ -7,3 +7,5 @@ starlette
 aiofiles
 python-multipart
 redis
+python-dotenv
+

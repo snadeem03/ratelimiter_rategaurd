@@ -1,0 +1,37 @@
+services:
+  rategaurd:
+    build: .
+    image: rategaurd:latest
+    container_name: rategaurd-app
+    ports:
+      - "8000:8000"
+    environment:
+      RATE_LIMIT_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
+      RATE_LIMIT_ALGORITHM: ${RATE_LIMIT_ALGORITHM:-sliding_window}
+      RATE_LIMIT: ${RATE_LIMIT:-5}
+      RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-60}
+      RATE_LIMIT_ROUTES: ${RATE_LIMIT_ROUTES:-}
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
+      ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:-}
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: rategaurd-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

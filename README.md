@@ -30,6 +30,59 @@ uvicorn app.main:app --reload            # http://127.0.0.1:8000
 
 Configurable via `.env`: `RATE_LIMIT_ALGORITHM`, `RATE_LIMIT`, `RATE_LIMIT_WINDOW`, `RATE_LIMIT_ROUTES`, `RATE_LIMIT_BACKEND` (`memory` | `redis`), `TRUST_PROXY_HEADERS`, `API_KEY_PREFIX`, `API_KEY_STORE_PATH`, `ADMIN_API_TOKEN`, `REDIS_URL`, and Redis timeouts.
 
+### Docker
+
+Run the **complete application**, including Redis, with a single command:
+
+```powershell
+docker compose up --build
+```
+
+Then open:
+
+- **http://localhost:8000** — the API (`GET /` health/info)
+- **http://localhost:8000/playground** — the interactive RateGuard Playground
+- **http://localhost:8000/docs** — OpenAPI docs
+
+Wait for both services to report **healthy** first (`docker compose ps`). Compose only starts RateGuard after the Redis health check passes, so the app's fail-fast Redis startup check succeeds immediately.
+
+#### Services
+
+| Service   | Image                 | Published port | Role                                     |
+|-----------|-----------------------|----------------|------------------------------------------|
+| `rategaurd` | built from `Dockerfile` | `8000:8000`    | FastAPI app, 2 uvicorn workers          |
+| `redis`   | `redis:7-alpine`      | *(none)*       | shared rate-limit state, not public      |
+
+Redis is **not exposed to the host** — it is only reachable on the Compose network under the service name `redis`. If you need it for local debugging, expose it explicitly (not recommended for production).
+
+#### Environment configuration
+
+Compose supplies the Redis backend automatically, with sensible defaults you can override by exporting the same variables before `docker compose up` (or placing them in a gitignored `.env` — see `.env.example`):
+
+- `RATE_LIMIT_BACKEND=redis`
+- `REDIS_URL=redis://redis:6379/0` (service name, never `localhost`)
+- `RATE_LIMIT_ALGORITHM`, `RATE_LIMIT`, `RATE_LIMIT_WINDOW`, `RATE_LIMIT_ROUTES`, `TRUST_PROXY_HEADERS`
+- `ADMIN_API_TOKEN` — **must be supplied via environment** to enable `/admin/api-keys`; unset disables the admin API (403). Never hardcode it and never commit it.
+
+`RATE_LIMIT_BACKEND=redis` makes all 2 uvicorn workers share the same rate-limit state (the existing Redis implementations), and preserves the **fail-fast** behaviour: if Redis is unreachable at startup the app raises instead of silently falling back to memory.
+
+#### Health checks
+
+- **Redis** — `redis-cli ping` every 5s; RateGuard waits for `service_healthy` before starting.
+- **RateGuard** — HTTP `GET /` (excluded from rate limiting) every 30s.
+
+#### Stop and logs
+
+```powershell
+docker compose down
+```
+
+```powershell
+docker compose logs -f            # both services
+docker compose logs -f rategaurd  # application only
+docker compose logs -f redis      # redis only
+```
+
 ## Endpoints
 
 - `GET /` — health/info
