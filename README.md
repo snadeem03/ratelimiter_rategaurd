@@ -1,493 +1,340 @@
 # RateGuard
 
 [![CI](https://github.com/snadeem03/ratelimiter_rategaurd/actions/workflows/ci.yml/badge.svg)](https://github.com/snadeem03/ratelimiter_rategaurd/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/snadeem03/ratelimiter_rategaurd)](https://github.com/snadeem03/ratelimiter_rategaurd/releases)
+![Python](https://img.shields.io/badge/python-3.12-blue?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-teal?logo=fastapi&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-d82c20?logo=redis&logoColor=white)
+![Docker](https://img.shields.io/badge/docker%20compose-2496ED?logo=docker&logoColor=white)
 
-A rate-limiting service built with **FastAPI + Redis**. It throttles clients using pluggable algorithms — **fixed window, sliding window, token bucket, leaky bucket** — each available with an in-memory (`memory`) or shared Redis (`redis`) backend. Rate limits are enforced per client (keyed by `X-API-Key` or client IP).
+A distributed API rate-limiting service built with **FastAPI + Redis** — four pluggable algorithms, two backends, per-client and per-route limits, managed API keys, Prometheus metrics, and an interactive playground.
+
+## Contents
+
+[Overview](#overview) · [Why RateGuard](#why-rateguard) · [Features](#feature-highlights) · [Architecture](#architecture) · [Algorithms](#algorithms) · [Distributed design](#redis--distributed-design) · [Headers](#rate-limit-headers) · [API keys](#api-key-management) · [Playground](#interactive-playground) · [Quick start](#quick-start) · [Configuration](#configuration) · [API examples](#api-examples) · [Observability](#observability) · [Benchmarking](#benchmarking) · [Testing & CI](#testing-and-ci) · [Docker](#docker-architecture) · [Security](#security) · [Structure](#project-structure) · [Release](#release)
+
+---
+
+## Overview
+
+RateGuard enforces rate limits at the API boundary **once**, inside a true ASGI middleware — before requests ever reach an endpoint.
+
+- **Four algorithms**: fixed window, sliding window, token bucket, leaky bucket — each implemented twice (in-process memory and Redis).
+- **Two backends**: `memory` for single-process apps; `redis` for shared state across multiple Uvicorn workers.
+- **Per-client limits** keyed by managed API key, legacy `X-API-Key`, or client IP.
+- **Per-route limits** via `RATE_LIMIT_ROUTES=path:limit:window,...`.
+- **Managed API keys** (`rg_live_*`): CSPRNG-generated, hash-only storage, admin CRUD.
+- **Standard headers** on every response: `X-RateLimit-*`, plus `Retry-After` on 429s.
+- **Observability**: Prometheus `/metrics`, provisioned Grafana dashboard.
+- **Interactive playground** at `/playground` driving the real algorithm implementations.
+- **One-command deployment**: `docker compose up --build` (app + Redis + Prometheus + Grafana).
+
+## Why RateGuard
+
+Naive rate limiters are counters in a dict. They break down exactly where real APIs get hard:
+
+- **Concurrency** — parallel requests race past a non-atomic check-then-increment. Every RateGuard decision is atomic (locks in memory, Lua scripts in Redis).
+- **Distributed workers** — production servers run several worker processes; process-local counters let each worker hand out the *full* quota again. With `RATE_LIMIT_BACKEND=redis` all workers share one source of truth.
+- **Clock skew** — distributed windows drift if each node trusts its own clock. The Redis implementations use the Redis server clock (`redis.call("TIME")`).
+- **Client isolation** — limits must be per identity, not global. RateGuard resolves identity (API key → owner, else IP) and keys every counter by `(route, client)`, so one noisy client can't exhaust anyone else's budget — and `/login` limits never interfere with `/products`.
+
+## Feature highlights
+
+| Algorithm | Memory | Redis | Per-route | Distributed |
+|---|:-:|:-:|:-:|:-:|
+| Fixed Window   | ✅ | ✅ | ✅ | ✅ |
+| Sliding Window | ✅ | ✅ | ✅ | ✅ |
+| Token Bucket   | ✅ | ✅ | ✅ | ✅ |
+| Leaky Bucket   | ✅ | ✅ | ✅ | ✅ |
+
+Also included:
+
+| Capability | What you get |
+|---|---|
+| API-key management | `rg_live_*` keys, SHA-256 hashed at rest, one-time secret display, revoke/expire |
+| Admin API | `/admin/api-keys` CRUD guarded by `X-Admin-Token` (disabled unless configured) |
+| Rate-limit headers | `X-RateLimit-Limit/Remaining/Reset` everywhere; `Retry-After` on 429 |
+| Playground | Browser UI driving the real algorithms, simulation + live-API modes |
+| Observability | Prometheus metrics + auto-provisioned Grafana dashboard |
+| Deployment | Multi-service Docker Compose, health-checked, non-root container |
+| CI | GitHub Actions: full suite against real Redis, Compose validation, image build |
 
 ## Architecture
 
-Rate-limit enforcement happens once, in a reusable **ASGI middleware layer** (`app/middleware/rate_limit_middleware.py`), before requests reach the endpoints. Endpoints no longer call the limiter themselves — the middleware is the single enforcement point:
-
-```
-ASGI Middleware (RateLimitMiddleware)
-      ↓
-Client / route resolution      # API-key / IP identity + request path
-      ↓
-RateLimiter facade             # per-(route, client) algorithm instances
-      ↓
-Algorithm                      # fixed/sliding window, token/leaky bucket
-      ↓
-Memory OR Redis backend        # atomic Lua scripts shared across uvicorn workers
-```
-
-The middleware inspects each HTTP request, resolves the client identity (`X-API-Key` or IP), applies the configured per-route limit (or the global fallback), and rejects over-limit requests with `429`. Every allowed response automatically receives the standard `X-RateLimit-*` headers, and over-limit responses include `Retry-After`. The root, docs, and OpenAPI paths (`/`, `/docs`, `/redoc`, `/openapi.json`) and the admin API (`/admin/...`) are never rate-limited.
-
-## Run
-
-```powershell
-venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-uvicorn app.main:app --reload            # http://127.0.0.1:8000
+```mermaid
+flowchart TD
+    C["Client"] --> MW["ASGI RateLimitMiddleware<br/><i>single enforcement point</i>"]
+    MW --> RES["Identity + route resolution<br/><i>X-API-Key / client IP · RATE_LIMIT_ROUTES</i>"]
+    RES --> FAC["RateLimiter facade<br/><i>per-(route, client) limiter instances</i>"]
+    FAC --> ALG["Algorithm<br/><i>fixed_window · sliding_window · token_bucket · leaky_bucket</i>"]
+    ALG -->|"memory"| MEM[("In-process state")]
+    ALG -->|"redis"| RED[("Redis<br/>atomic Lua scripts, server clock")]
+    MW -->|"allowed + X-RateLimit-*"| EP["FastAPI endpoint"]
+    MW -->|"over limit: 429 + Retry-After"| C
+    W1["uvicorn worker 1"] -.-> RED
+    W2["uvicorn worker 2"] -.-> RED
 ```
 
-Configurable via `.env`: `RATE_LIMIT_ALGORITHM`, `RATE_LIMIT`, `RATE_LIMIT_WINDOW`, `RATE_LIMIT_ROUTES`, `RATE_LIMIT_BACKEND` (`memory` | `redis`), `TRUST_PROXY_HEADERS`, `API_KEY_PREFIX`, `API_KEY_STORE_PATH`, `ADMIN_API_TOKEN`, `REDIS_URL`, and Redis timeouts.
+Excluded from limiting: `/`, `/docs`, `/redoc`, `/openapi.json`, `/metrics`, everything under `/admin/` and `/playground/`. Responses are streamed through untouched — the middleware merges headers without buffering bodies.
 
-Configuration is validated at startup: a non-integer or non-positive `RATE_LIMIT`/`RATE_LIMIT_WINDOW`, or a malformed/non-positive `RATE_LIMIT_ROUTES` entry, aborts startup with a clear error instead of misbehaving at request time.
+## Algorithms
 
-### Docker
+| Algorithm | How it works | Best for | In RateGuard |
+|---|---|---|---|
+| **Fixed Window** | Counter per `window`; resets when the window rolls over | Cheap, coarse throttling | Counter resets automatically; burst at window edges can admit up to 2× limit |
+| **Sliding Window** | Timestamps within the last `window` seconds only | Fair, continuous limiting (default) | No edge bursts; older timestamps expire continuously |
+| **Token Bucket** | Bucket of `limit` tokens refilling at `limit/window` per second | Allowing controlled bursts | Bursts up to capacity pass instantly, then sustained refill pacing applies |
+| **Leaky Bucket** | FIFO queue draining at a constant `limit/window` rate | Smoothing traffic to constant outflow | Bursts up to capacity queue/pass; a full bucket rejects until a slot drains |
 
-Run the **complete application**, including Redis, with a single command:
+**Token bucket vs leaky bucket** — both tolerate bursts, in opposite directions: the token bucket *spends* pre-accumulated allowance (burst goes out immediately, then refills); the leaky bucket *queues* the burst and releases it at a fixed drain rate. Token bucket shapes the client's sending pattern; leaky bucket shapes what your backend receives.
 
-```powershell
+All four share the same contract: `allow_request()` returns `(allowed, remaining, reset_seconds)` and is safe under concurrency.
+
+<details>
+<summary><strong>Redis / distributed design</strong></summary>
+
+Why Redis, and how it stays correct:
+
+- **Shared truth** — one Redis key per `(algorithm, route, client)` means N uvicorn workers enforce one combined budget instead of N separate ones.
+- **Atomicity** — every decision (admission, refill/drain, TTL refresh) runs as a single Lua script; concurrent requests cannot oversubscribe the last slot. One round-trip returns `{allowed, remaining, reset}`.
+- **Server clock** — scripts read time via `redis.call("TIME")`, so all workers agree regardless of host clock skew. Memory implementations use `time.monotonic()`.
+- **TTL cleanup** — every state key carries a TTL (window length or full-drain time, refreshed per request), so idle clients leave no permanent keys.
+- **Fail fast, not silent** — with `RATE_LIMIT_BACKEND=redis` the app pings Redis at startup and refuses to boot if it's unreachable; there is no silent fallback to memory. A Redis outage mid-flight fails closed (loud error), never open.
+- **Key hygiene** — benchmark and playground runs use namespaced keys and clean them up afterwards.
+
+</details>
+
+## Rate-limit headers
+
+Every response from a rate-limited endpoint carries:
+
+| Header | Meaning |
+|---|---|
+| `X-RateLimit-Limit` | Max requests per window |
+| `X-RateLimit-Remaining` | Requests left in the current window |
+| `X-RateLimit-Reset` | Seconds until the budget resets |
+| `Retry-After` *(429 only)* | Seconds until a request will succeed again (RFC 6585) |
+
+```http
+HTTP/1.1 200 OK
+X-RateLimit-Limit: 5
+X-RateLimit-Remaining: 3
+X-RateLimit-Reset: 42
+```
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 43
+X-RateLimit-Limit: 5
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 43
+```
+
+```json
+{"detail": {"retry_after": 43}}
+```
+
+## API-key management
+
+- **Send keys** via `X-API-Key`. Keys carry the configured prefix (`rg_live_`) and are generated with a cryptographically secure RNG.
+- **Hash-only persistence** — only a SHA-256 digest is stored (JSON file, or a Redis hash with the `redis` backend). The plaintext is shown **once**, in the create response, and never appears in list/get results or logs.
+- **Identity semantics** — the rate-limit identity is the key's `owner` (or its digest when no owner). Two keys sharing an owner share a quota; different owners get independent budgets.
+- **Validation behavior** — valid/enabled/unexpired key authenticates; missing header falls back to client IP; an explicitly supplied but invalid/disabled/expired key gets `401` (never a silent IP fallback). Non-managed header values keep the legacy opaque-client behavior.
+- **Lifecycle** — optional TTL at creation (`ttl` seconds), revocation, and deletion via the admin API.
+
+Admin endpoints require `X-Admin-Token` matching `ADMIN_API_TOKEN` (constant-time comparison). Unset token ⇒ the admin API answers `403` — nothing is publicly accessible by default.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /admin/api-keys` | Create a key (secret returned once) |
+| `GET /admin/api-keys` | List metadata (no secrets) |
+| `POST /admin/api-keys/{id}/revoke` | Disable a key |
+| `DELETE /admin/api-keys/{id}` | Delete permanently |
+
+## Interactive playground
+
+Open **[`/playground`](http://localhost:8000/playground)** while the app is running. It's served by RateGuard itself — same origin, no CORS, nothing leaves your machine.
+
+- **Simulation mode** drives the *actual* RateGuard algorithm implementations server-side (via the same factory the API uses) — the browser never re-implements rate limiting. Pick algorithm, limit, window, backend (Memory/Redis), client ID and route, then send single requests or bursts.
+- **Live API mode** sends real HTTP requests through the ASGI middleware and visualizes the genuine `X-RateLimit-*` / `Retry-After` headers, including real 429s. Optional API key is sent per request and never persisted.
+- **Visualizations per algorithm**: animated fixed-window counter with reset countdown, sliding-window timeline with expiring entries, token-bucket refill/drain, leaky-bucket FIFO queue.
+- **Request flow strip** (`Client → Middleware → Limiter → Result`) pulses per request; the live log records status, remaining, reset and full 429 detail; metrics show allowed/rejected/rate/success%.
+- Animations respect `prefers-reduced-motion`. Redis unavailability is shown explicitly — never silently downgraded to memory.
+
+## Quick start
+
+```bash
+git clone https://github.com/snadeem03/ratelimiter_rategaurd.git
+cd ratelimiter_rategaurd
 docker compose up --build
 ```
 
-Then open:
+Wait for healthy services (`docker compose ps`), then open:
 
-- **http://localhost:8000** — the API (`GET /` health/info, `GET /metrics` Prometheus metrics)
-- **http://localhost:8000/playground** — the interactive RateGuard Playground
-- **http://localhost:8000/docs** — OpenAPI docs
-- **http://localhost:3000** — Grafana with the provisioned **RateGuard Overview** dashboard (see [Observability stack](#observability-stack-prometheus--grafana))
+| URL | What |
+|---|---|
+| http://localhost:8000 | API health/info |
+| http://localhost:8000/playground | Interactive playground |
+| http://localhost:8000/docs | Swagger UI (OpenAPI) |
+| http://localhost:8000/metrics | Prometheus exposition |
+| http://localhost:3000 | Grafana (provisioned dashboard) |
 
-Wait for all services to report **healthy** first (`docker compose ps`). Compose only starts RateGuard after the Redis health check passes, so the app's fail-fast Redis startup check succeeds immediately.
+Compose starts the app only after the Redis health check passes, so the fail-fast backend check succeeds immediately. Stop with `docker compose down`; logs with `docker compose logs -f <service>`.
 
-#### Services
-
-| Service      | Image                     | Published port | Role                                        |
-|--------------|---------------------------|----------------|---------------------------------------------|
-| `rategaurd`  | built from `Dockerfile`   | `8000:8000`    | FastAPI app, 2 uvicorn workers              |
-| `redis`      | `redis:7-alpine`          | *(none)*       | shared rate-limit state, not public         |
-| `prometheus` | `prom/prometheus:v3.4.1`  | *(none)*       | scrapes `rategaurd:8000/metrics`, internal  |
-| `grafana`    | `grafana/grafana:11.6.0`  | `3000:3000`    | dashboards over Prometheus                  |
-
-Redis and Prometheus are **not exposed to the host** — they are only reachable on the Compose network under their service names (`redis`, `prometheus`). If you need them for local debugging, expose them explicitly (not recommended for production).
-
-#### Environment configuration
-
-Compose supplies the Redis backend automatically, with sensible defaults you can override by exporting the same variables before `docker compose up` (or placing them in a gitignored `.env` — see `.env.example`):
-
-- `RATE_LIMIT_BACKEND=redis`
-- `REDIS_URL=redis://redis:6379/0` (service name, never `localhost`)
-- `RATE_LIMIT_ALGORITHM`, `RATE_LIMIT`, `RATE_LIMIT_WINDOW`, `RATE_LIMIT_ROUTES`, `TRUST_PROXY_HEADERS`
-- `ADMIN_API_TOKEN` — **must be supplied via environment** to enable `/admin/api-keys`; unset disables the admin API (403). Never hardcode it and never commit it.
-
-`RATE_LIMIT_BACKEND=redis` makes all 2 uvicorn workers share the same rate-limit state (the existing Redis implementations), and preserves the **fail-fast** behaviour: if Redis is unreachable at startup the app raises instead of silently falling back to memory.
-
-#### Health checks
-
-- **Redis** — `redis-cli ping` every 5s; RateGuard waits for `service_healthy` before starting.
-- **RateGuard** — HTTP `GET /` (excluded from rate limiting) every 30s.
-- **Prometheus** — `GET /-/healthy` every 15s.
-- **Grafana** — `GET /api/health` every 15s.
-
-#### Stop and logs
+<details>
+<summary><strong>Local Python setup (alternative)</strong></summary>
 
 ```powershell
-docker compose down
+python -m venv venv
+.\venv\Scripts\Activate.ps1        # Linux/macOS: source venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload      # http://127.0.0.1:8000
 ```
 
-```powershell
-docker compose logs -f            # all services
-docker compose logs -f rategaurd  # application only
-docker compose logs -f redis      # redis only
-docker compose logs -f prometheus # prometheus only
-docker compose logs -f grafana    # grafana only
+Redis is optional locally — use it only with `RATE_LIMIT_BACKEND=redis`
+(e.g. `docker run -p 6379:6379 redis:7-alpine`). For shared limits across
+multiple workers: `uvicorn app.main:app --workers 4` with the Redis backend.
+
+</details>
+
+## Configuration
+
+All configuration is environment-based (see [`.env.example`](.env.example)); every variable has a safe default.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RATE_LIMIT_ALGORITHM` | `sliding_window` | `fixed_window` \| `sliding_window` \| `token_bucket` \| `leaky_bucket` |
+| `RATE_LIMIT` | `5` | Global request limit per window (≥ 1) |
+| `RATE_LIMIT_WINDOW` | `60` | Window length in seconds (≥ 1) |
+| `RATE_LIMIT_ROUTES` | *(empty)* | Per-route overrides: `/api/login:10:60,/api/products:200:60` |
+| `RATE_LIMIT_BACKEND` | `memory` | `memory` (per-process) \| `redis` (shared across workers) |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis address (service name `redis` under Compose) |
+| `REDIS_PASSWORD` | *(empty)* | Redis auth password |
+| `REDIS_SOCKET_TIMEOUT` / `REDIS_SOCKET_CONNECT_TIMEOUT` | `2` | Redis timeouts (seconds) |
+| `REDIS_HEALTH_CHECK_INTERVAL` | `30` | Redis health-check interval |
+| `ADMIN_API_TOKEN` | *(empty)* | Enables `/admin/api-keys`; empty = disabled (403) |
+| `TRUST_PROXY_HEADERS` | `false` | Trust `X-Forwarded-For` only behind a trusted proxy |
+| `API_KEY_PREFIX` | `rg_live_` | Managed-key prefix |
+| `API_KEY_STORE_PATH` | `api_keys.json` | JSON store path (memory backend) |
+
+Invalid values abort startup with a clear error naming the variable — misconfiguration never surfaces as a runtime failure. Never commit `.env` or real tokens.
+
+## API examples
+
+```bash
+# Normal rate-limited request (identity = your IP)
+curl -i http://localhost:8000/api/test
+
+# Past the limit -> 429 with Retry-After
+# (repeat the call ~6 times with the default config)
+
+# Authenticated request (managed key)
+curl -i http://localhost:8000/api/test -H "X-API-Key: rg_live_your_key_here"
+
+# Route-specific limits: start with overrides, then hit both routes
+RATE_LIMIT_ROUTES=/api/login:10:60,/api/products:200:60
+# /api/login allows 10/min, /api/products allows 200/min — independent budgets
+
+# Admin API (placeholder token; set ADMIN_API_TOKEN first)
+curl -X POST http://localhost:8000/admin/api-keys \
+  -H "X-Admin-Token: $ADMIN_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"my-app","owner":"acme","ttl":3600}'
 ```
 
-### Observability stack (Prometheus + Grafana)
-
-`docker compose up --build` starts a complete local observability stack with **zero manual configuration**:
-
-1. RateGuard exposes Prometheus metrics at `GET /metrics` (never rate-limited, consumes no budget).
-2. **Prometheus** scrapes `http://rategaurd:8000/metrics` over the internal Compose network (config: [`prometheus/prometheus.yml`](prometheus/prometheus.yml), 5s scrape interval, 7-day retention in the `prometheus_data` volume).
-3. **Grafana** (http://localhost:3000) is provisioned automatically:
-   - the **Prometheus datasource** points at `http://prometheus:9090` (internal) — no manual datasource setup;
-   - the **RateGuard Overview** dashboard is loaded from [`grafana/provisioning/dashboards/`](grafana/provisioning/) at startup.
-
-The dashboard visualizes only metrics that RateGuard actually exposes: total requests, allowed requests, rejected requests (429s), rejection rate, request rate by status/route, decisions by algorithm and backend, request latency (avg/p50/p95/p99 from the histogram), and observed rate-limit utilization per route. No client IDs, API keys or IPs appear anywhere — all labels are bounded (`route`, `status`, `decision`, `algorithm`, `backend`).
-
-Generate traffic to see it live, e.g.:
-
-```powershell
-# burst past the default limit of 5 to produce allowed + rejected decisions
-1..20 | ForEach-Object { try { Invoke-WebRequest -UseBasicParsing http://localhost:8000/api/test -Headers @{ "X-API-Key" = "demo-client" } } catch {} }
-```
-
-#### Grafana credentials
-
-Grafana admin credentials are read from environment variables with **local-development defaults**:
-
-| Variable                 | Default | Purpose                |
-|--------------------------|---------|------------------------|
-| `GRAFANA_ADMIN_USER`     | `admin` | Grafana admin username |
-| `GRAFANA_ADMIN_PASSWORD` | `admin` | Grafana admin password |
-
-Override them via your gitignored `.env` (see `.env.example`) or by exporting them before `docker compose up`. The defaults are for **local development only** — never reuse them where the stack is reachable by others, and never commit real credentials.
-
-Observability data persists across restarts in the named Docker volumes `prometheus_data` and `grafana_data`; remove them with `docker compose down -v` for a clean slate.
-
-## Continuous Integration
-
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every **push to `main`** and every **pull request targeting `main`**:
-
-- **Test suite** — Python 3.12 (same major as the Dockerfile), dependencies installed from `requirements.txt` with pip caching, then the complete suite via `python -m pytest -v`.
-- **Real Redis** — a `redis:7-alpine` service container (health-checked with `redis-cli ping`) is started before tests run; `RATE_LIMIT_BACKEND=redis` and `REDIS_URL=redis://localhost:6379/0` are set using the application's normal configuration conventions. The Redis-backed tests execute against this real Redis — they are **not** mocked and must not skip: the workflow fails if any test reports `Redis is not available`. No secrets are required.
-- **Docker validation** — `docker compose config` validates the Compose file, and the application image is built to catch `Dockerfile` regressions.
-
-The workflow uses only repository files and GitHub-hosted runners — it does not depend on local `.env`, local Redis, or developer-specific paths.
-
-## Endpoints
-
-- `GET /` — health/info
-- `GET /metrics` — Prometheus metrics (never rate-limited)
-- `GET /api/test` — rate-limited test endpoint
-- `POST /api/login` — rate-limited login endpoint
-- `GET /api/products` — rate-limited products endpoint
-- `POST /api/orders` — rate-limited orders endpoint
-
-## Per-route rate limits
-
-By default every route shares the global `RATE_LIMIT` / `RATE_LIMIT_WINDOW`. To give specific routes their own limits, set `RATE_LIMIT_ROUTES` as a comma-separated list of `path:limit:window` entries:
-
-```dotenv
-# GET /api/test        -> 100 requests/minute
-# POST /api/login      -> 10 requests/minute
-# GET /api/products    -> 200 requests/minute
-# POST /api/orders     -> 30 requests/minute
-RATE_LIMIT_ROUTES=/api/test:100:60,/api/login:10:60,/api/products:200:60,/api/orders:30:60
-```
-
-Routes not listed in `RATE_LIMIT_ROUTES` fall back to the global `RATE_LIMIT` and `RATE_LIMIT_WINDOW`.
-
-Limits are still enforced **per client**: the effective key is `route + client`, so the limit for `/api/login` never interferes with `/api/products`, and two clients never share a budget. With the Redis backend the key is `rateguard:{algorithm}:{route}:{client}`, so limits stay correct across uvicorn workers.
-
-## Leaky bucket (Redis backend)
-
-Select the distributed leaky bucket with `RATE_LIMIT_ALGORITHM=leaky_bucket` and `RATE_LIMIT_BACKEND=redis`. The bucket is stored in Redis so all uvicorn workers share the same state:
-
-- **State** — admitted requests live in a sorted set per `rateguard:leaky_bucket:{route}:{client}` key; a per-bucket counter (`:seq`) keeps members unique and a `:last_leak` timestamp drives the drain. Timestamps come from `redis.call("TIME")` (the Redis server clock), so workers agree regardless of client clock skew.
-- **Leak rate** — the bucket drains `limit / RATE_LIMIT_WINDOW` requests per second in FIFO order (one slot frees every `RATE_LIMIT_WINDOW / limit` seconds). Bursts up to `capacity` pass immediately; a full bucket rejects with `429` until the next slot drains.
-- **Atomicity** — admission and leak run in a single Lua script, so concurrent requests cannot oversubscribe the last slot.
-- **Expiry** — every state key gets a TTL equal to the full-drain time (`capacity / leak_rate`, refreshed on each request), so buckets abandoned by idle clients never linger in Redis.
-
-## API keys
-
-RateGuard can authenticate clients with API keys sent via the `X-API-Key` header.
-
-### How keys work
-
-- Keys are generated with a cryptographically secure RNG and carry a `rg_live_` prefix (configurable via `API_KEY_PREFIX`).
-- Only a **SHA-256 digest** of the key is stored; the plaintext key is shown exactly once, at creation time, and is never logged or returned by any list/get endpoint.
-- The rate-limit identity for a key is its stable **client identity**: the key's `owner` if set, otherwise its digest. Two keys with different owners get independent quotas; two keys sharing an `owner` share a quota.
-
-```powershell
-# create a key
-curl -X POST http://127.0.0.1:8000/admin/api-keys `
-  -H "Content-Type: application/json" `
-  -d '{"name":"my-app","owner":"acme"}'
-
-# response (the only time the secret is shown)
-# {"key":"rg_live_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX","id":"...","name":"my-app","enabled":true,"owner":"acme","created_at":"...","expires_at":null}
-```
-
-### Usage
-
-```http
-GET /api/products HTTP/1.1
-X-API-Key: rg_live_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-```
-
-### Authentication behavior
-
-- **Valid, enabled, non-expired key** → used as the primary client identity for rate limiting.
-- **No `X-API-Key` header** → falls back to the client IP (or `X-Forwarded-For` when `TRUST_PROXY_HEADERS=true`). Existing clients that don't use API keys are unaffected.
-- **`X-API-Key` supplied but invalid / disabled / expired** → `401 Unauthorized`. There is no silent IP fallback for an explicitly supplied key that fails validation.
-- Header values that do **not** match the managed `rg_live_` prefix keep the legacy opaque-client behaviour.
-
-### Revocation
-
-All `/admin/api-keys` endpoints are protected by an **admin token**. Set the `ADMIN_API_TOKEN` environment variable and send it with every admin request:
-
-```http
-X-Admin-Token: <your-admin-token>
-```
-
-When `ADMIN_API_TOKEN` is not set, the admin API is disabled and every admin request is rejected with `403` — nothing is publicly accessible by default. The token is compared in constant time and is never logged or returned by any endpoint.
-
-```powershell
-# disable a key (it can no longer authenticate)
-curl -X POST http://127.0.0.1:8000/admin/api-keys/{id}/revoke -H "X-Admin-Token: $env:ADMIN_API_TOKEN"
-
-# permanently delete a key
-curl -X DELETE http://127.0.0.1:8000/admin/api-keys/{id} -H "X-Admin-Token: $env:ADMIN_API_TOKEN"
-
-# list key metadata (never includes the secret)
-curl http://127.0.0.1:8000/admin/api-keys -H "X-Admin-Token: $env:ADMIN_API_TOKEN"
-```
-
-The key `id` is an opaque identifier returned by `POST /admin/api-keys` and `GET /admin/api-keys`; it is not the secret and cannot be used to authenticate.
-
-### Storage
-
-- Default (memory backend): a local JSON file at `API_KEY_STORE_PATH` (default `api_keys.json`, gitignored). Set `API_KEY_STORE_PATH` to relocate it.
-- Redis backend (`RATE_LIMIT_BACKEND=redis`): keys are stored in Redis hashes (`rateguard:apikey:{hash}`) so they work across uvicorn workers.
-
-## Rate limit response headers
-
-Every response from a rate-limited endpoint includes the standard headers:
-
-| Header                  | Description                                        |
-| ----------------------- | -------------------------------------------------- |
-| `X-RateLimit-Limit`     | Maximum requests allowed per window                |
-| `X-RateLimit-Remaining` | Requests still available in the current window     |
-| `X-RateLimit-Reset`     | Seconds until the limit resets                     |
-
-### 429 responses
-
-When a client exceeds its limit the API responds with `429 Too Many Requests` and:
-
-- the same `X-RateLimit-*` headers (`X-RateLimit-Remaining` is `0`, never negative),
-- an RFC 6585 `Retry-After` header set to the same value as `X-RateLimit-Reset` (seconds until a request will be allowed again),
-- the reset value also in the response body as `detail.retry_after`.
-
-## Observability / Metrics
-
-RateGuard exposes **Prometheus-compatible metrics** at:
-
-```
-GET /metrics
-```
-
-The endpoint is never rate-limited and does not consume any client's budget.
-
-### Available metrics
-
-| Metric | Type | Labels | Description |
-| ------ | ---- | ------ | ----------- |
-| `rateguard_http_requests_total` | counter | `route`, `status` | Total HTTP requests processed, by route and HTTP status code |
-| `rateguard_rate_limit_requests_total` | counter | `decision`, `algorithm`, `backend`, `route` | Rate-limit decisions; `decision="allowed"` vs `decision="rejected"` (429s) |
-| `rateguard_http_request_duration_seconds` | histogram | `route` | Request latency, measured by the ASGI middleware when the response completes (no response buffering); exposes `_count`, `_sum`, `_bucket` |
-| `rateguard_rate_limit_utilization` | gauge | `route` | Fraction of the per-client budget consumed on the most recent decision per route (`1 - X-RateLimit-Remaining / X-RateLimit-Limit`, clamped to `[0, 1]`); rejected requests report full utilization |
-
-Derived queries: requests by algorithm/backend/route are the `rateguard_rate_limit_requests_total` label combinations; the rejection count is `decision="rejected"`; per-status totals come from the `status` label. Standard `prometheus_client` process metrics (`python_*`, `process_*`) are also exposed.
-
-### Labels and cardinality
-
-Labels are strictly bounded to prevent cardinality explosions:
-
-- `algorithm` — one of `fixed_window`, `sliding_window`, `token_bucket`, `leaky_bucket`
-- `backend` — `memory` or `redis`
-- `decision` — `allowed` or `rejected`
-- `route` — only known/configured routes (`/api/test`, `/api/login`, `/api/products`, `/api/orders`, `/`, `/metrics`, plus anything listed in `RATE_LIMIT_ROUTES`); every other path is aggregated under the single value `other`
-- `status` — the HTTP status code (plus `error` if a response never started)
-
-**API keys, client identities, IP addresses, session IDs and arbitrary request parameters are never used as metric labels**, and no per-client time series exist. Unknown paths cannot create new label values.
-
-### Process-local vs multi-worker aggregation
-
-Counters live in each worker process (`prometheus_client` default registry):
-
-- **Single worker** (`uvicorn app.main:app`) — `/metrics` is fully accurate.
-- **Multiple workers** — by default `/metrics` returns whichever worker happened to serve that scrape; counters are honest but *worker-local*, not globally aggregated.
-- **Aggregated multi-worker mode** — set `PROMETHEUS_MULTIPROC_DIR` to a writable directory and `prometheus_client`'s [multiprocess mode](https://prometheus.github.io/client_python/multiprocess/) merges all workers of the container at scrape time. The provided `docker-compose.yml` enables this (`PROMETHEUS_MULTIPROC_DIR=/tmp/rateguard_metrics`).
-
-Metrics collection adds **no Redis round-trips**: nothing about a request is written to Redis for monitoring purposes, so the rate-limit hot path is unaffected.
-
-### Scraping with Prometheus
-
-```yaml
-scrape_configs:
-  - job_name: rategaurd
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["rategaurd-host:8000"]
-```
-
-For multiple replicas scrape each instance; for one container running several uvicorn workers use the multiprocess mode above so a single scrape sees all workers. The bundled Docker Compose stack already wires this up — see [Observability stack (Prometheus + Grafana)](#observability-stack-prometheus--grafana) — or point your own scraper at the port using [`prometheus/prometheus.yml`](prometheus/prometheus.yml) as a starting point.
+## Observability
+
+`GET /metrics` exposes Prometheus-format metrics (never rate-limited, consumes no budget):
+
+| Metric | Type | Labels |
+|---|---|---|
+| `rateguard_http_requests_total` | counter | `route`, `status` |
+| `rateguard_rate_limit_requests_total` | counter | `decision`, `algorithm`, `backend`, `route` |
+| `rateguard_http_request_duration_seconds` | histogram | `route` (avg/p50/p95/p99) |
+| `rateguard_rate_limit_utilization` | gauge | `route` |
+
+- **Cardinality safety** — labels are strictly bounded; unknown paths aggregate under `other`. API keys, client IDs and IPs are never labels; there are no per-client series.
+- **Multi-worker aggregation** — set `PROMETHEUS_MULTIPROC_DIR` (the provided compose stack does) so one scrape sees all workers' counters.
+- **Zero hot-path cost** — metrics add no Redis round-trips.
+- **Grafana** — the bundled stack provisions the datasource and a *RateGuard Overview* dashboard (requests, allowed/rejected, rejection rate, decisions by algorithm/backend, latency percentiles, utilization per route). Grafana credentials come from `GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD` (local-dev defaults, override before exposing).
 
 ## Benchmarking
 
-The `benchmark/` package measures the four rate-limiting algorithms on both
-backends. It drives the **real** limiter implementations (no mocks) and saves
-results to `benchmark/results/` (CSV + JSON).
+The `benchmark/` package drives the **real** limiter implementations (no mocks) across algorithms × backends × traffic patterns × concurrency levels:
 
-```powershell
-# in-memory benchmark of all four algorithms (burst traffic)
-python -m benchmark.benchmark
-
-# Redis-backed benchmark, all algorithms
-python -m benchmark.benchmark --backend redis
-
-# both backends, three traffic patterns, concurrency 1 / 10 / 50
-python -m benchmark.benchmark --backend both --traffic all --concurrency 1,10,50
-
-# a single scenario
-python -m benchmark.benchmark --backend redis --algorithm token_bucket --traffic burst --requests 1000 --concurrency 10
+```bash
+python -m benchmark.benchmark                                  # memory, all algorithms, burst
+python -m benchmark.benchmark --backend redis                  # Redis-backed
+python -m benchmark.benchmark --backend both --traffic all --concurrency all
+python -m benchmark.benchmark --backend redis --algorithm token_bucket \
+    --traffic burst --requests 1000 --concurrency 10
 ```
 
-### Flags
+- **Traffic patterns** — `normal` (half sustainable rate), `burst` (rapid-fire), `sustained` (exactly at rate).
+- **Correctness gate** — every scenario verifies on a fresh limiter that exactly `limit` requests pass before timing anything.
+- **Metrics** — RPS, allowed/rejected counts, avg/p50/p95/p99 latency of `allow_request()`.
+- **Output** — table, CSV, JSON (saved under `benchmark/results/`).
+- **Isolation** — unique `run_id`-scoped Redis keys, deleted after each run.
 
-| Flag | Default | Description |
-| ---- | ------- | ----------- |
-| `--backend` | `memory` | `memory`, `redis`, or `both` |
-| `--algorithm` | `all` | `all` or `fixed_window`, `sliding_window`, `token_bucket`, `leaky_bucket` |
-| `--traffic` | `burst` | `all`, `normal`, `burst`, or `sustained` |
-| `--requests` | `1000` | total requests per scenario |
-| `--concurrency` | `1` | comma-separated worker counts, or `all` for `1,10,50` |
-| `--limit` / `--window` | `100` / `60` | the rate-limit configuration applied to every algorithm |
-| `--interval` | auto | seconds between requests for paced traffic |
-| `--redis-url` | env | override `REDIS_URL` |
-| `--format` | `all` | `table` (print only), `csv`, `json`, or `all` |
+Numbers depend heavily on hardware and topology, so this README deliberately publishes none — run it yourself.
 
-### Traffic patterns
+## Testing and CI
 
-- **burst** — rapid-fire requests with no spacing; the limit is hit immediately
-  and subsequent requests are rejected.
-- **normal** — requests spaced at *half* the sustainable rate
-  (`window / limit * 2` seconds), so nearly everything is allowed.
-- **sustained** — requests paced right at the sustainable rate
-  (`window / limit` seconds), producing a mix of allowed and rejected.
-
-For paced patterns each run takes roughly `requests * interval` seconds;
-use smaller `--requests` or set `--interval` explicitly to keep runs short.
-
-### Concurrency
-
-`--concurrency 1,10,50` runs each scenario with 1, 10, and 50 concurrent
-workers. These are **benchmark scenarios, not universally representative
-deployments**:
-
-- memory backend: all workers share one limiter instance (lock contention).
-- Redis backend: each worker gets its own limiter instance but they share the
-  same Redis keys, mirroring a multi-worker uvicorn deployment. Results include
-  Redis connection-pool and Lua-script contention.
-
-### Correctness before measurement
-
-Before timing, every scenario verifies on a fresh limiter that exactly
-`limit` requests pass and the next ones are rejected, so the benchmark never
-bypasses the configured limit. Burst runs additionally assert the total
-allowed requests never exceed `limit`.
-
-### Measured metrics
-
-| Metric | Meaning |
-| ------ | ------- |
-| `Requests` / `Allowed` / `Rejected` | request totals |
-| `RPS` | requests per second over wall-clock elapsed time |
-| `Avg / P50 / P95 / P99 (ms)` | per-request `allow_request()` latency percentiles |
-
-### Redis isolation
-
-Every run uses unique keys (`rateguard:{algorithm}:bench:{run_id}:...`) and
-deletes them afterwards, so no state leaks between scenarios or runs.
-
-### Redis availability
-
-- `--backend redis` with no reachable server **fails clearly** (exit code 1).
-- `--backend both` with no reachable server prints an explicit message and runs
-  memory-only. There is no silent fallback for an explicitly requested Redis
-  benchmark.
-
-### Caveats
-
-Comparisons are only indicative, not authoritative:
-
-- Algorithm semantics differ (fixed window re-opens each window, sliding window
-  is continuous, token bucket refills continuously, leaky bucket drains FIFO).
-- Redis results include network round-trips and connection-pool effects.
-- **Results depend on your machine, Python version, and Redis deployment**
-  (single-node vs clustered, network latency, CPU). Treat numbers as relative
-  comparisons on the same host, not absolute guarantees.
-
-## RateGuard Playground
-
-A local, interactive playground for visually exploring the **real** RateGuard
-rate-limiting algorithms. It is a developer/testing tool, not a production
-dashboard — no authentication, no remote backend, nothing leaves your machine.
-
-### 1. Start RateGuard
-
-```powershell
-venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-uvicorn app.main:app --reload        # http://127.0.0.1:8000
+```bash
+python -m pytest -v     # 323 tests
 ```
 
-Redis is optional for the playground. It is only needed for the **Redis**
-backend options (simulation backend and Redis-backed live API).
+- Redis-backed tests execute against a **real Redis** and skip cleanly when none is running locally.
+- GitHub Actions ([`ci.yml`](.github/workflows/ci.yml)) runs on pushes/PRs to `main`: the full suite on Python 3.12 against a `redis:7-alpine` service container (skips fail the job), plus `docker compose config` validation and an image build.
 
-### 2. Open the playground
+## Docker architecture
 
-Browse to **http://127.0.0.1:8000/playground**. The page is served by the same
-RateGuard app, so everything runs on your machine with no CORS or external
-services.
+| Service | Image | Ports | Role |
+|---|---|---|---|
+| `rategaurd` | built from `Dockerfile` | `8000:8000` | FastAPI app, 2 uvicorn workers, non-root user, health-checked |
+| `redis` | `redis:7-alpine` | **internal only** | Shared rate-limit state |
+| `prometheus` | `prom/prometheus:v3.4.1` | internal only | Scrapes `rategaurd:8000/metrics` |
+| `grafana` | `grafana/grafana:11.6.0` | `3000:3000` | Provisioned dashboards |
 
-### 3. Simulation mode (default)
+Redis and Prometheus are reachable only on the Compose network — never published to the host.
 
-Simulation drives the **actual RateGuard algorithm implementations** server-side
-through the rate-limiter factory — the browser never re-implements rate
-limiting, so what you see is exactly what the running API enforces.
+## Security
 
-- Pick an **algorithm**, a **limit** and a **window**; select **Memory** (no
-  Redis needed) or **Redis** (uses the real Redis-backed algorithms; requires a
-  reachable server — otherwise you get **Redis unavailable** and requests fail,
-  there is no silent memory fallback).
-- Choose a **client ID** (the identity that keys the limit) and a **route**.
-- **Send 1**, **Send 5**, or **Burst** (overshoots the limit to show 429s);
-  **Start auto** sends one request on a timer; **Reset** recreates the limiter
-  and clears the log.
+- API keys generated with a CSPRNG (`secrets` module); only SHA-256 digests stored; secrets shown exactly once, never logged.
+- Admin API off by default; token compared in constant time (byte-safe against malformed input).
+- `X-Forwarded-For` honored only when `TRUST_PROXY_HEADERS=true` — prevents identity spoofing outside a trusted proxy.
+- Invalid/non-positive configuration aborts startup instead of failing at request time.
+- Non-root container user; Redis/Prometheus not exposed publicly; `.env` and key stores gitignored; no secrets in repository history.
+- Bounded metric labels prevent cardinality attacks and data leakage.
 
-Because simulation uses the real algorithms, bursts behave exactly like the
-live API: the configured number of requests pass and the rest are rejected.
+## Project structure
 
-### 4. Live API mode
+```
+app/
+  main.py                     # FastAPI app, wiring, endpoints, admin API
+  config.py                   # env parsing + route-limit parsing
+  api_keys.py                 # ApiKeyStore (JSON) / RedisApiKeyStore
+  core/                       # config-driven Redis client
+  middleware/                 # ASGI RateLimitMiddleware + RateLimiter facade
+  algorithms/                 # 4 algorithms × (memory, Redis/Lua)
+  storage/                    # Redis wrapper + key builders
+  playground/                 # simulation engine (real algorithms)
+  static/                     # playground frontend
+prometheus/, grafana/         # observability provisioning
+tests/                        # 323 tests
+benchmark/                    # CLI benchmark system
+Dockerfile, docker-compose.yml
+.env.example                  # safe configuration template
+```
 
-Switch to **Live API** to send real HTTP requests through RateGuard's ASGI
-rate-limit middleware. It reads the `X-RateLimit-Limit`, `X-RateLimit-Remaining`,
-`X-RateLimit-Reset` and `Retry-After` headers from every real response and
-visualizes them, including the real 429 rejection.
+## Release
 
-- The API base defaults to the same origin (`http://127.0.0.1:8000`); you can
-  point it elsewhere, but then the target must allow CORS.
-- An optional **X-API-Key** is sent on each request. Managed keys
-  (`rg_live_*`) are authenticated against the existing store; any other value
-  acts as an opaque client identity — the same behaviour as the real API. Keys
-  are never persisted, stored in `localStorage`, or logged.
-- Live mode shows the **server's actual configuration** (algorithm, backend,
-  limit, window, per-route limits) read-only. To change it, edit `.env` and
-  restart — the playground never modifies your configuration.
+**RateGuard v1.0.0** — see [releases](https://github.com/snadeem03/ratelimiter_rategaurd/releases). A production-oriented rate-limiting service for local development, testing, and deployment. Distributed enforcement verified across workers, startup-fail-fast configuration, hardened admin auth, full test suite green in CI.
 
-### 5. Memory vs Redis
+## Future work
 
-- **Memory** — per-process limiters (simulation) / whatever the server runs
-  (live).
-- **Redis** — the real Redis-backed implementations shared across workers (live
-  mode requires the server to run `RATE_LIMIT_BACKEND=redis`). A badge in the
-  header always reports Redis reachability; an unavailable Redis is shown as
-  **Redis unavailable**, never silently downgraded.
+Short list of genuinely planned items (not commitments):
 
-### 6. Algorithm selection
-
-Each algorithm gets its own visualization:
-
-- **Fixed Window** — a counter with per-request slots, a window progress bar,
-  countdown, and an animated window reset when the window expires.
-- **Sliding Window** — a live timeline; requests appear at "now" and slide left
-  until they pass the expiry boundary and disappear.
-- **Token Bucket** — a bucket that refills continuously (tokens animate back in)
-  and drains one token per allowed request; an empty bucket rejects with a shake.
-- **Leaky Bucket** — a FIFO queue that fills from the top and drains at a
-  constant rate out the bottom; a full bucket rejects at the inlet.
-
-The request flow strip (`Client → Middleware → Limiter → Result`) pulses on every
-request, and the live request log records each event with status, remaining,
-reset, route, client, and full 429 header details.
-
-### 7. What the visualization represents
-
-Every metric is real: remaining, reset, allowed/rejected counts, rate and
-success percentage come from the live algorithm state or the actual response
-headers — nothing is fabricated. Animations respect `prefers-reduced-motion`
-and are purely presentational; the underlying numbers always come from
-RateGuard itself.
+- Per-algorithm header tuning (e.g. bucket-specific reset semantics)
+- Distributed multi-host benchmark orchestration
+- Optional clustered-Redis guidance beyond single-node deployments
