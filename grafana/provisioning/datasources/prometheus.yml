@@ -1,0 +1,18 @@
+# Provisioned Prometheus datasource for Grafana.
+#
+# Grafana reaches Prometheus over the internal Docker Compose network via
+# the service name `prometheus` (port 9090 is not published to the host).
+# The fixed uid `prometheus` is referenced by the provisioned dashboard.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s

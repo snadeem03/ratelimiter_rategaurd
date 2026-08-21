@@ -15,3 +15,5 @@ Dockerfile
 docker-compose.yml
 tests
 *.md
+prometheus
+grafana

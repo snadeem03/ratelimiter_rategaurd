@@ -18,6 +18,7 @@ METRIC_NAMES = {
     "rateguard_http_requests_total",
     "rateguard_rate_limit_requests_total",
     "rateguard_http_request_duration_seconds",
+    "rateguard_rate_limit_utilization",
 }
 
 ALLOWED_LABELS = {"route", "status", "decision", "algorithm", "backend"}
@@ -269,6 +270,43 @@ class TestCounters:
 
         assert client.get("/").status_code == 200
         assert root_delta() == 1
+
+
+class TestUtilizationMetric:
+    def _utilization(self, route="/api/test"):
+        return REGISTRY.get_sample_value(
+            "rateguard_rate_limit_utilization",
+            {"route": route},
+        )
+
+    def test_partial_utilization_after_first_request(self, client):
+        key = _unique_client()
+
+        assert _request("/api/test", client, key).status_code == 200
+
+        expected = 1 - (app_module.limit - 1) / app_module.limit
+
+        assert self._utilization() == pytest.approx(expected)
+
+    def test_full_utilization_when_budget_exhausted(self, client):
+        key = _unique_client()
+        statuses = [
+            _request("/api/test", client, key).status_code
+            for _ in range(app_module.limit + 2)
+        ]
+
+        assert 429 in statuses
+        assert self._utilization() == pytest.approx(1.0)
+
+    def test_utilization_stays_within_unit_range(self, client):
+        key = _unique_client()
+
+        for _ in range(app_module.limit + 3):
+            _request("/api/test", client, key)
+
+        value = self._utilization()
+
+        assert 0.0 <= value <= 1.0
 
 
 class TestBackendLabels:

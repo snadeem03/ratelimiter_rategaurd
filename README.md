@@ -43,17 +43,20 @@ Then open:
 - **http://localhost:8000** — the API (`GET /` health/info, `GET /metrics` Prometheus metrics)
 - **http://localhost:8000/playground** — the interactive RateGuard Playground
 - **http://localhost:8000/docs** — OpenAPI docs
+- **http://localhost:3000** — Grafana with the provisioned **RateGuard Overview** dashboard (see [Observability stack](#observability-stack-prometheus--grafana))
 
-Wait for both services to report **healthy** first (`docker compose ps`). Compose only starts RateGuard after the Redis health check passes, so the app's fail-fast Redis startup check succeeds immediately.
+Wait for all services to report **healthy** first (`docker compose ps`). Compose only starts RateGuard after the Redis health check passes, so the app's fail-fast Redis startup check succeeds immediately.
 
 #### Services
 
-| Service   | Image                 | Published port | Role                                     |
-|-----------|-----------------------|----------------|------------------------------------------|
-| `rategaurd` | built from `Dockerfile` | `8000:8000`    | FastAPI app, 2 uvicorn workers          |
-| `redis`   | `redis:7-alpine`      | *(none)*       | shared rate-limit state, not public      |
+| Service      | Image                     | Published port | Role                                        |
+|--------------|---------------------------|----------------|---------------------------------------------|
+| `rategaurd`  | built from `Dockerfile`   | `8000:8000`    | FastAPI app, 2 uvicorn workers              |
+| `redis`      | `redis:7-alpine`          | *(none)*       | shared rate-limit state, not public         |
+| `prometheus` | `prom/prometheus:v3.4.1`  | *(none)*       | scrapes `rategaurd:8000/metrics`, internal  |
+| `grafana`    | `grafana/grafana:11.6.0`  | `3000:3000`    | dashboards over Prometheus                  |
 
-Redis is **not exposed to the host** — it is only reachable on the Compose network under the service name `redis`. If you need it for local debugging, expose it explicitly (not recommended for production).
+Redis and Prometheus are **not exposed to the host** — they are only reachable on the Compose network under their service names (`redis`, `prometheus`). If you need them for local debugging, expose them explicitly (not recommended for production).
 
 #### Environment configuration
 
@@ -70,6 +73,8 @@ Compose supplies the Redis backend automatically, with sensible defaults you can
 
 - **Redis** — `redis-cli ping` every 5s; RateGuard waits for `service_healthy` before starting.
 - **RateGuard** — HTTP `GET /` (excluded from rate limiting) every 30s.
+- **Prometheus** — `GET /-/healthy` every 15s.
+- **Grafana** — `GET /api/health` every 15s.
 
 #### Stop and logs
 
@@ -78,10 +83,44 @@ docker compose down
 ```
 
 ```powershell
-docker compose logs -f            # both services
+docker compose logs -f            # all services
 docker compose logs -f rategaurd  # application only
 docker compose logs -f redis      # redis only
+docker compose logs -f prometheus # prometheus only
+docker compose logs -f grafana    # grafana only
 ```
+
+### Observability stack (Prometheus + Grafana)
+
+`docker compose up --build` starts a complete local observability stack with **zero manual configuration**:
+
+1. RateGuard exposes Prometheus metrics at `GET /metrics` (never rate-limited, consumes no budget).
+2. **Prometheus** scrapes `http://rategaurd:8000/metrics` over the internal Compose network (config: [`prometheus/prometheus.yml`](prometheus/prometheus.yml), 5s scrape interval, 7-day retention in the `prometheus_data` volume).
+3. **Grafana** (http://localhost:3000) is provisioned automatically:
+   - the **Prometheus datasource** points at `http://prometheus:9090` (internal) — no manual datasource setup;
+   - the **RateGuard Overview** dashboard is loaded from [`grafana/provisioning/dashboards/`](grafana/provisioning/) at startup.
+
+The dashboard visualizes only metrics that RateGuard actually exposes: total requests, allowed requests, rejected requests (429s), rejection rate, request rate by status/route, decisions by algorithm and backend, request latency (avg/p50/p95/p99 from the histogram), and observed rate-limit utilization per route. No client IDs, API keys or IPs appear anywhere — all labels are bounded (`route`, `status`, `decision`, `algorithm`, `backend`).
+
+Generate traffic to see it live, e.g.:
+
+```powershell
+# burst past the default limit of 5 to produce allowed + rejected decisions
+1..20 | ForEach-Object { try { Invoke-WebRequest -UseBasicParsing http://localhost:8000/api/test -Headers @{ "X-API-Key" = "demo-client" } } catch {} }
+```
+
+#### Grafana credentials
+
+Grafana admin credentials are read from environment variables with **local-development defaults**:
+
+| Variable                 | Default | Purpose                |
+|--------------------------|---------|------------------------|
+| `GRAFANA_ADMIN_USER`     | `admin` | Grafana admin username |
+| `GRAFANA_ADMIN_PASSWORD` | `admin` | Grafana admin password |
+
+Override them via your gitignored `.env` (see `.env.example`) or by exporting them before `docker compose up`. The defaults are for **local development only** — never reuse them where the stack is reachable by others, and never commit real credentials.
+
+Observability data persists across restarts in the named Docker volumes `prometheus_data` and `grafana_data`; remove them with `docker compose down -v` for a clean slate.
 
 ## Endpoints
 
@@ -214,6 +253,7 @@ The endpoint is never rate-limited and does not consume any client's budget.
 | `rateguard_http_requests_total` | counter | `route`, `status` | Total HTTP requests processed, by route and HTTP status code |
 | `rateguard_rate_limit_requests_total` | counter | `decision`, `algorithm`, `backend`, `route` | Rate-limit decisions; `decision="allowed"` vs `decision="rejected"` (429s) |
 | `rateguard_http_request_duration_seconds` | histogram | `route` | Request latency, measured by the ASGI middleware when the response completes (no response buffering); exposes `_count`, `_sum`, `_bucket` |
+| `rateguard_rate_limit_utilization` | gauge | `route` | Fraction of the per-client budget consumed on the most recent decision per route (`1 - X-RateLimit-Remaining / X-RateLimit-Limit`, clamped to `[0, 1]`); rejected requests report full utilization |
 
 Derived queries: requests by algorithm/backend/route are the `rateguard_rate_limit_requests_total` label combinations; the rejection count is `decision="rejected"`; per-status totals come from the `status` label. Standard `prometheus_client` process metrics (`python_*`, `process_*`) are also exposed.
 
@@ -249,7 +289,7 @@ scrape_configs:
       - targets: ["rategaurd-host:8000"]
 ```
 
-For multiple replicas scrape each instance; for one container running several uvicorn workers use the multiprocess mode above so a single scrape sees all workers. No Prometheus/Grafana containers ship with this repository — point your own scraper at the port.
+For multiple replicas scrape each instance; for one container running several uvicorn workers use the multiprocess mode above so a single scrape sees all workers. The bundled Docker Compose stack already wires this up — see [Observability stack (Prometheus + Grafana)](#observability-stack-prometheus--grafana) — or point your own scraper at the port using [`prometheus/prometheus.yml`](prometheus/prometheus.yml) as a starting point.
 
 ## Benchmarking
 

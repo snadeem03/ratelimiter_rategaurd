@@ -19,6 +19,7 @@ from prometheus_client import (
     REGISTRY,
     CollectorRegistry,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
 )
@@ -87,6 +88,18 @@ REQUEST_DURATION_SECONDS = Histogram(
     ),
 )
 
+# Last observed fraction of the per-client budget consumed per route
+# (1 - X-RateLimit-Remaining / X-RateLimit-Limit). ``livemax`` keeps a
+# single sample per route in multiprocess mode (max across live workers)
+# so no ``pid`` label leaks into the exposition.
+RATE_LIMIT_UTILIZATION = Gauge(
+    "rateguard_rate_limit_utilization",
+    "Fraction of the rate-limit budget consumed, observed on the most "
+    "recent decision per route.",
+    ["route"],
+    multiprocess_mode="livemax",
+)
+
 
 def registry():
     """Return the collector registry to scrape.
@@ -144,3 +157,18 @@ def record_rate_limit_decision(
 
 def observe_latency(route: str, seconds: float) -> None:
     REQUEST_DURATION_SECONDS.labels(route=route).observe(seconds)
+
+
+def observe_utilization(route: str, remaining: int, limit: int) -> None:
+    """Record the observed budget consumption for a route.
+
+    ``remaining``/``limit`` come from the real ``X-RateLimit-*`` headers
+    computed by the limiter. The value is clamped to [0, 1]; a rejected
+    request (remaining 0) reports full utilization.
+    """
+    if limit <= 0:
+        return
+
+    RATE_LIMIT_UTILIZATION.labels(route=route).set(
+        max(0.0, min(1.0, 1.0 - remaining / limit))
+    )
