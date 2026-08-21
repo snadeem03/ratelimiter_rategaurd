@@ -3,13 +3,14 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.api_keys import ApiKeyStore, RedisApiKeyStore
 from app.config import parse_route_limits
+from app.metrics import metrics_body
 from app.middleware.rate_limiter import RateLimiter
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
 from app.playground import simulation as playground_sim
@@ -58,7 +59,20 @@ route_limits = parse_route_limits(
     os.getenv("RATE_LIMIT_ROUTES", "")
 )
 
-EXCLUDED_PATHS = {"/", "/docs", "/redoc", "/openapi.json"}
+EXCLUDED_PATHS = {"/", "/docs", "/redoc", "/openapi.json", "/metrics"}
+
+# Route label values used by the Prometheus metrics. Configured per-route
+# limits are known routes too; everything else is aggregated under "other".
+METRICS_KNOWN_ROUTES = frozenset(
+    {
+        *EXCLUDED_PATHS,
+        *route_limits,
+        "/api/test",
+        "/api/login",
+        "/api/products",
+        "/api/orders",
+    }
+)
 
 API_KEY_PREFIX = os.getenv(
     "API_KEY_PREFIX",
@@ -165,6 +179,20 @@ def root():
         "version": "1.1.0",
         "algorithm": algorithm
     }
+
+
+@app.get("/metrics")
+def prometheus_metrics():
+    """Prometheus exposition endpoint (never rate-limited).
+
+    Counters are process-local unless PROMETHEUS_MULTIPROC_DIR is set,
+    in which case the workers of this container are aggregated at scrape
+    time by prometheus_client's multiprocess collector.
+    """
+    return Response(
+        content=metrics_body(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 @app.get("/api/test")
@@ -458,4 +486,5 @@ app.add_middleware(
     excluded_paths=EXCLUDED_PATHS,
     route_limits=route_limits,
     excluded_prefixes=("/admin", "/playground"),
+    known_routes=METRICS_KNOWN_ROUTES,
 )

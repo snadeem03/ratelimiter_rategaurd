@@ -37,6 +37,12 @@ class RateLimiter:
         self._limiters = OrderedDict()
         self._lock = threading.Lock()
 
+    @property
+    def backend(self) -> str:
+        """The backing store: ``redis`` when shared storage is configured,
+        otherwise ``memory``."""
+        return "redis" if self._storage is not None else "memory"
+
     def _route_config(self, route):
         """Resolve (limit, window) for a route, falling back to the
         global default when the route has no specific configuration."""
