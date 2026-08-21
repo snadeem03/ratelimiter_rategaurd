@@ -18,6 +18,7 @@ from app.core.redis_client import get_redis
 from app.storage.redis_storage import RedisStorage
 
 SESSION_TTL_SECONDS = 1800.0
+MAX_SESSIONS = 100
 MAX_EVENTS = 500
 MAX_BURST = 500
 MAX_TIMESTAMPS = 120
@@ -117,7 +118,12 @@ class SimSession:
     def reset(self):
         """Recreate the limiter and drop recorded metrics/events."""
         if self.backend == "redis":
-            self._delete_redis_keys()
+            try:
+                self._delete_redis_keys()
+            except redis_lib.RedisError as exc:
+                raise RedisUnavailable(
+                    "Redis became unavailable during the simulation"
+                ) from exc
 
         self.events.clear()
         self.requests = 0
@@ -363,6 +369,17 @@ def create_session(
 
     with _SESSIONS_LOCK:
         _evict_stale()
+
+        # Hard cap so unauthenticated session creation cannot grow the
+        # registry (and its Redis keys) without bound; the least recently
+        # accessed session is closed first.
+        while len(_SESSIONS) >= MAX_SESSIONS:
+            oldest = min(
+                _SESSIONS.values(),
+                key=lambda session: session.last_access,
+            )
+            _SESSIONS.pop(oldest.session_id, None)
+            oldest.close()
 
         session = SimSession(
             session_id=session_id,

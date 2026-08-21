@@ -341,3 +341,51 @@ class TestSimRedis:
         )
 
         assert leftovers == []
+
+
+class TestSimHardening:
+    def test_reset_returns_503_when_redis_unavailable(self, client, monkeypatch):
+        from app.playground.simulation import RedisUnavailable, SimSession
+
+        def broken_reset(self):
+            raise RedisUnavailable("Redis became unavailable during the simulation")
+
+        monkeypatch.setattr(SimSession, "reset", broken_reset)
+
+        created = client.post(
+            "/playground/sim/session",
+            json={"algorithm": "token_bucket", "limit": 3},
+        )
+        sid = created.json()["session_id"]
+
+        response = client.post("/playground/sim/reset", json={"session_id": sid})
+
+        assert response.status_code == 503
+        assert response.json()["detail"]["error"] == "Redis unavailable"
+
+        client.post("/playground/sim/close", json={"session_id": sid})
+
+    def test_session_registry_is_capped(self, client, monkeypatch):
+        from app.playground import simulation
+
+        monkeypatch.setattr(simulation, "MAX_SESSIONS", 2)
+
+        session_ids = []
+
+        try:
+            for _ in range(3):
+                response = client.post(
+                    "/playground/sim/session",
+                    json={"algorithm": "token_bucket", "limit": 3},
+                )
+                assert response.status_code == 201
+                session_ids.append(response.json()["session_id"])
+
+            assert len(simulation._SESSIONS) == 2
+            # The least recently used (first) session was evicted.
+            assert simulation.get_session(session_ids[0]) is None
+            assert simulation.get_session(session_ids[1]) is not None
+            assert simulation.get_session(session_ids[2]) is not None
+        finally:
+            for sid in session_ids:
+                simulation.close_session(sid)

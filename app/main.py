@@ -26,24 +26,32 @@ app = FastAPI(
 )
 
 
+def _env_int(name: str, default: str) -> int:
+    """Read an integer environment variable, failing fast with a clear
+    error when the value is not a valid integer."""
+    raw = os.getenv(name, default)
+
+    try:
+        return int(raw)
+    except ValueError:
+        raise RuntimeError(
+            f"{name} must be an integer, got {raw!r}"
+        ) from None
+
+
 algorithm = os.getenv(
     "RATE_LIMIT_ALGORITHM",
     "sliding_window"
 )
 
-limit = int(
-    os.getenv(
-        "RATE_LIMIT",
-        "5"
-    )
-)
+limit = _env_int("RATE_LIMIT", "5")
+window = _env_int("RATE_LIMIT_WINDOW", "60")
 
-window = int(
-    os.getenv(
-        "RATE_LIMIT_WINDOW",
-        "60"
-    )
-)
+if limit < 1:
+    raise RuntimeError(f"RATE_LIMIT must be >= 1, got {limit}")
+
+if window < 1:
+    raise RuntimeError(f"RATE_LIMIT_WINDOW must be >= 1, got {window}")
 
 TRUST_PROXY_HEADERS = os.getenv(
     "TRUST_PROXY_HEADERS",
@@ -256,9 +264,15 @@ def admin_required(request: Request):
 
     supplied = request.headers.get("X-Admin-Token")
 
-    if not supplied or not hmac.compare_digest(
-        supplied,
-        ADMIN_API_TOKEN
+    # Compare bytes: ``hmac.compare_digest`` raises TypeError for
+    # non-ASCII ``str`` inputs, which would turn a malformed token into
+    # a 500 instead of a 403.
+    if (
+        not supplied
+        or not hmac.compare_digest(
+            supplied.encode("utf-8"),
+            ADMIN_API_TOKEN.encode("utf-8"),
+        )
     ):
         raise HTTPException(
             status_code=403,
@@ -455,9 +469,8 @@ def playground_sim_reset(body: PlaygroundSession):
             detail="Simulation session not found",
         )
 
-    session.reset()
-
     try:
+        session.reset()
         return _playground_sim_payload(session)
     except playground_sim.RedisUnavailable as exc:
         raise HTTPException(

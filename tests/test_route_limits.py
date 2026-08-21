@@ -51,6 +51,23 @@ class TestParseRouteLimits:
         with pytest.raises(ValueError):
             parse_route_limits("/api/login:ten:60")
 
+    def test_non_numeric_error_names_the_entry(self):
+        with pytest.raises(ValueError, match="/api/login:ten:60"):
+            parse_route_limits("/api/login:ten:60")
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            "/api/login:0:60",
+            "/api/login:-5:60",
+            "/api/login:10:0",
+            "/api/login:10:-30",
+        ],
+    )
+    def test_zero_and_negative_values_rejected(self, entry):
+        with pytest.raises(ValueError, match=">= 1"):
+            parse_route_limits(entry)
+
     def test_invalid_route_path(self):
         with pytest.raises(ValueError):
             parse_route_limits("api/login:10:60")

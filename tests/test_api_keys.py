@@ -385,6 +385,21 @@ class TestAdminProtection:
         )
         assert response.status_code == 403
 
+    def test_non_ascii_token_rejected_not_500(self, admin_token):
+        # hmac.compare_digest raises on non-ASCII str; the guard must
+        # still answer 403 rather than crash with a TypeError (which
+        # uvicorn clients can trigger with raw non-ASCII header bytes
+        # that httpx itself refuses to send).
+        from fastapi import HTTPException
+
+        class _FakeRequest:
+            headers = {"X-Admin-Token": "tökën"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            app_module.admin_required(_FakeRequest())
+
+        assert exc_info.value.status_code == 403
+
     def test_all_admin_endpoints_protected(self, client, admin_token):
         assert (
             client.post(

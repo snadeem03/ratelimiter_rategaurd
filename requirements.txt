@@ -4,8 +4,6 @@ pytest
 httpx
 pydantic
 starlette
-aiofiles
-python-multipart
 redis
 python-dotenv
 prometheus_client
