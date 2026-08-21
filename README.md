@@ -1,5 +1,7 @@
 # RateGuard
 
+[![CI](https://github.com/snadeem03/ratelimiter_rategaurd/actions/workflows/ci.yml/badge.svg)](https://github.com/snadeem03/ratelimiter_rategaurd/actions/workflows/ci.yml)
+
 A rate-limiting service built with **FastAPI + Redis**. It throttles clients using pluggable algorithms — **fixed window, sliding window, token bucket, leaky bucket** — each available with an in-memory (`memory`) or shared Redis (`redis`) backend. Rate limits are enforced per client (keyed by `X-API-Key` or client IP).
 
 ## Architecture
@@ -121,6 +123,16 @@ Grafana admin credentials are read from environment variables with **local-devel
 Override them via your gitignored `.env` (see `.env.example`) or by exporting them before `docker compose up`. The defaults are for **local development only** — never reuse them where the stack is reachable by others, and never commit real credentials.
 
 Observability data persists across restarts in the named Docker volumes `prometheus_data` and `grafana_data`; remove them with `docker compose down -v` for a clean slate.
+
+## Continuous Integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every **push to `main`** and every **pull request targeting `main`**:
+
+- **Test suite** — Python 3.12 (same major as the Dockerfile), dependencies installed from `requirements.txt` with pip caching, then the complete suite via `python -m pytest -v`.
+- **Real Redis** — a `redis:7-alpine` service container (health-checked with `redis-cli ping`) is started before tests run; `RATE_LIMIT_BACKEND=redis` and `REDIS_URL=redis://localhost:6379/0` are set using the application's normal configuration conventions. The Redis-backed tests execute against this real Redis — they are **not** mocked and must not skip: the workflow fails if any test reports `Redis is not available`. No secrets are required.
+- **Docker validation** — `docker compose config` validates the Compose file, and the application image is built to catch `Dockerfile` regressions.
+
+The workflow uses only repository files and GitHub-hosted runners — it does not depend on local `.env`, local Redis, or developer-specific paths.
 
 ## Endpoints
 
