@@ -1,0 +1,18 @@
+# Provision the RateGuard dashboard from the local filesystem.
+#
+# Grafana loads every *.json in this directory at startup, so the
+# dashboard is available immediately after `docker compose up --build`.
+
+apiVersion: 1
+
+providers:
+  - name: RateGuard
+    orgId: 1
+    folder: RateGuard
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

@@ -8,6 +8,7 @@ from starlette.requests import Request
 
 from app.metrics import (
     observe_latency,
+    observe_utilization,
     record_http_request,
     record_rate_limit_decision,
     route_label,
@@ -122,12 +123,18 @@ class RateLimitMiddleware:
 
         allowed = rate_limiter.allow_request(key, route=path)
         headers = rate_limiter.rate_limit_headers(key, route=path)
+        label = route_label(path, self.known_routes)
 
         record_rate_limit_decision(
             allowed=allowed,
             algorithm=getattr(rate_limiter, "algorithm", "unknown"),
             backend=getattr(rate_limiter, "backend", "unknown"),
-            route=route_label(path, self.known_routes),
+            route=label,
+        )
+        observe_utilization(
+            label,
+            remaining=int(headers["X-RateLimit-Remaining"]),
+            limit=int(headers["X-RateLimit-Limit"]),
         )
 
         if not allowed:

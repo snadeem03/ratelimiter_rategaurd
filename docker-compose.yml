@@ -27,6 +27,52 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  prometheus:
+    image: prom/prometheus:v3.4.1
+    container_name: rategaurd-prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    depends_on:
+      rategaurd:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: rategaurd-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # Local development defaults; override via the environment or a
+      # gitignored .env (see .env.example). Never commit real credentials.
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     container_name: rategaurd-redis
@@ -36,3 +82,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+volumes:
+  prometheus_data:
+  grafana_data:

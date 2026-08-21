@@ -1,0 +1,19 @@
+# Prometheus configuration for the RateGuard observability stack.
+#
+# RateGuard is scraped over the internal Docker Compose network using the
+# service name `rategaurd` — no published host port is needed. The
+# self-scrape job keeps an eye on Prometheus itself.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: rategaurd
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["rategaurd:8000"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
