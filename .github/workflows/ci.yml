@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test suite (Python 3.12, real Redis)
+    runs-on: ubuntu-latest
+
+    env:
+      # Application conventions from .env.example / app.core.redis_client.
+      # Makes the Redis-backed tests run against the real service container
+      # instead of skipping ("Redis is not available").
+      RATE_LIMIT_BACKEND: redis
+      REDIS_URL: redis://localhost:6379/0
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Verify Redis is reachable before tests
+        run: python -c "import redis; assert redis.Redis.from_url('redis://localhost:6379/0').ping(); print('Redis OK')"
+
+      - name: Run full test suite
+        run: |
+          set -o pipefail
+          python -m pytest -v -ra 2>&1 | tee pytest_output.txt
+          if grep -q "Redis is not available" pytest_output.txt; then
+            echo "::error::Redis-backed tests were skipped; the Redis service must be reachable in CI."
+            exit 1
+          fi
+
+  docker:
+    name: Docker Compose validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+
+      - name: Build application image
+        run: docker compose build rategaurd
