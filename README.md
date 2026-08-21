@@ -32,6 +32,8 @@ uvicorn app.main:app --reload            # http://127.0.0.1:8000
 
 Configurable via `.env`: `RATE_LIMIT_ALGORITHM`, `RATE_LIMIT`, `RATE_LIMIT_WINDOW`, `RATE_LIMIT_ROUTES`, `RATE_LIMIT_BACKEND` (`memory` | `redis`), `TRUST_PROXY_HEADERS`, `API_KEY_PREFIX`, `API_KEY_STORE_PATH`, `ADMIN_API_TOKEN`, `REDIS_URL`, and Redis timeouts.
 
+Configuration is validated at startup: a non-integer or non-positive `RATE_LIMIT`/`RATE_LIMIT_WINDOW`, or a malformed/non-positive `RATE_LIMIT_ROUTES` entry, aborts startup with a clear error instead of misbehaving at request time.
+
 ### Docker
 
 Run the **complete application**, including Redis, with a single command:
