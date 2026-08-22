@@ -14,6 +14,7 @@ services:
       RATE_LIMIT_ROUTES: ${RATE_LIMIT_ROUTES:-}
       TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
       ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:-}
+      RATE_LIMIT_AUDIT_MAX_EVENTS: ${RATE_LIMIT_AUDIT_MAX_EVENTS:-1000}
       PROMETHEUS_MULTIPROC_DIR: /tmp/rateguard_metrics
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
     depends_on:

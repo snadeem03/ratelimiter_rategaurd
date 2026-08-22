@@ -11,7 +11,7 @@ A distributed API rate-limiting service built with **FastAPI + Redis** — four 
 
 ## Contents
 
-[Overview](#overview) · [Why RateGuard](#why-rateguard) · [Features](#feature-highlights) · [Architecture](#architecture) · [Algorithms](#algorithms) · [Distributed design](#redis--distributed-design) · [Headers](#rate-limit-headers) · [API keys](#api-key-management) · [Playground](#interactive-playground) · [Quick start](#quick-start) · [Configuration](#configuration) · [Dynamic policies](#dynamic-rate-limit-policies) · [API examples](#api-examples) · [Observability](#observability) · [Benchmarking](#benchmarking) · [Testing & CI](#testing-and-ci) · [Docker](#docker-architecture) · [Security](#security) · [Structure](#project-structure) · [Release](#release)
+[Overview](#overview) · [Why RateGuard](#why-rateguard) · [Features](#feature-highlights) · [Architecture](#architecture) · [Algorithms](#algorithms) · [Distributed design](#redis--distributed-design) · [Headers](#rate-limit-headers) · [API keys](#api-key-management) · [Playground](#interactive-playground) · [Quick start](#quick-start) · [Configuration](#configuration) · [Dynamic policies](#dynamic-rate-limit-policies) · [Policy audit history](#policy-audit-history) · [API examples](#api-examples) · [Observability](#observability) · [Benchmarking](#benchmarking) · [Testing & CI](#testing-and-ci) · [Docker](#docker-architecture) · [Security](#security) · [Structure](#project-structure) · [Release](#release)
 
 ---
 
@@ -213,6 +213,7 @@ All configuration is environment-based (see [`.env.example`](.env.example)); eve
 | `REDIS_SOCKET_TIMEOUT` / `REDIS_SOCKET_CONNECT_TIMEOUT` | `2` | Redis timeouts (seconds) |
 | `REDIS_HEALTH_CHECK_INTERVAL` | `30` | Redis health-check interval |
 | `ADMIN_API_TOKEN` | *(empty)* | Enables `/admin/api-keys`; empty = disabled (403) |
+| `RATE_LIMIT_AUDIT_MAX_EVENTS` | `1000` | Bounded retention for the policy audit trail (≥ 1) |
 | `TRUST_PROXY_HEADERS` | `false` | Trust `X-Forwarded-For` only behind a trusted proxy |
 | `API_KEY_PREFIX` | `rg_live_` | Managed-key prefix |
 | `API_KEY_STORE_PATH` | `api_keys.json` | JSON store path (memory backend) |
@@ -287,6 +288,54 @@ If Redis becomes unavailable, policy operations return `503 {"error": "Redis una
 
 Policy management increments `rateguard_policy_updates_total{operation,outcome}` (bounded labels: `set|delete|list|read × success|error`). Route paths are never used as metric labels.
 
+## Policy Audit History
+
+Every successful dynamic policy mutation through the admin API records one **immutable audit event** — an append-only change trail, not a logging system. The rate-limit hot path never reads it; current policy behavior stays entirely with the existing policy store/resolver.
+
+**What is recorded** (exactly these fields, nothing else):
+
+```json
+{
+  "event_id": "9f1c…",            // random UUID — unique, not sequential
+  "timestamp": "2026-08-23T02:01:18.123456+00:00",
+  "operation": "update",          // create | update | delete
+  "route": "/api/orders",
+  "previous_policy": {"route":"/api/orders","limit":30,"window":60,"enabled":true},
+  "new_policy": {"route":"/api/orders","limit":50,"window":60,"enabled":true},
+  "actor": "admin"
+}
+```
+
+- `create` → `previous_policy: null`; `delete` → `new_policy: null`. Toggling `enabled` appears as an ordinary `update` whose before/after snapshots show the flip.
+- **Who** — the actor is the fixed identifier `"admin"` (the admin surface has a single shared token identity). The token itself is **never stored or echoed** anywhere in audit data.
+- **Retention** — bounded to the newest `RATE_LIMIT_AUDIT_MAX_EVENTS` events (default `1000`); once full, the oldest events are discarded. No archival, no export pipeline.
+
+### Access
+
+```bash
+# Recent events, newest first (limit ≤ 500; optional route/operation filters)
+curl "http://localhost:8000/admin/rate-limits/audit?limit=20&operation=update" \
+  -H "X-Admin-Token: <ADMIN_API_TOKEN>"
+
+curl "http://localhost:8000/admin/rate-limits/audit?route=/api/orders" \
+  -H "X-Admin-Token: <ADMIN_API_TOKEN>"
+```
+
+Same protection as every admin endpoint: missing/wrong/unconfigured `X-Admin-Token` → `403`. Responses contain no tokens, API keys, hashes, credentials, or client IPs.
+
+### Redis vs memory
+
+| Backend | Behavior |
+|---|---|
+| `redis` | One Redis Stream (`rateguard:audit:policies`) shared by **all workers and hosts**; history survives restarts as long as Redis data persists. |
+| `memory` | Bounded in-process deque: **process-local, ephemeral, not shared between workers, lost on restart**. Memory mode provides no distributed audit history. |
+
+**Atomicity & failure semantics** — on Redis, the policy write and its audit event are one Lua-script execution: a mutation can never succeed while its event is silently lost, and a recorded `previous_policy` is always the document that was actually replaced. If recording fails, the whole mutation fails closed (`503`) with **no state change**. Ordinary rate-limited requests are unaffected by any audit problem.
+
+Audit events also increment `rateguard_policy_audit_events_total{operation,outcome}` (bounded labels: `create|update|delete × success|error`).
+
+> This is a lightweight operational trail for answering *what changed, when, by whom*. It is not a compliance/audit platform — no tamper-proofing beyond Redis persistence, no export, no user attribution beyond the single shared admin identity.
+
 ## API examples
 
 ```bash
@@ -320,6 +369,8 @@ curl -X POST http://localhost:8000/admin/api-keys \
 | `rateguard_rate_limit_requests_total` | counter | `decision`, `algorithm`, `backend`, `route` |
 | `rateguard_http_request_duration_seconds` | histogram | `route` (avg/p50/p95/p99) |
 | `rateguard_rate_limit_utilization` | gauge | `route` |
+| `rateguard_policy_updates_total` | counter | `operation`, `outcome` |
+| `rateguard_policy_audit_events_total` | counter | `operation`, `outcome` |
 
 - **Cardinality safety** — labels are strictly bounded; unknown paths aggregate under `other`. API keys, client IDs and IPs are never labels; there are no per-client series.
 - **Multi-worker aggregation** — set `PROMETHEUS_MULTIPROC_DIR` (the provided compose stack does) so one scrape sees all workers' counters.

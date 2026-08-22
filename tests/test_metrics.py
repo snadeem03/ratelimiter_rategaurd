@@ -20,10 +20,13 @@ METRIC_NAMES = {
     "rateguard_http_request_duration_seconds",
     "rateguard_rate_limit_utilization",
     "rateguard_policy_updates_total",
+    "rateguard_policy_audit_events_total",
 }
 
 # ``operation``/``outcome`` belong to rateguard_policy_updates_total and
-# are strictly bounded (set|delete|list|read x success|error).
+# rateguard_policy_audit_events_total and are strictly bounded
+# (set|delete|list|read x success|error and create|update|delete x
+# success|error respectively).
 ALLOWED_LABELS = {
     "route",
     "status",

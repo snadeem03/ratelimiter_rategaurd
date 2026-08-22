@@ -18,13 +18,33 @@ Two implementations share one interface:
     workers of all hosts share this state. No TTL: policies persist
     until explicitly deleted.
 
+Audit-aware mutations
+---------------------
+When constructed with an ``audit`` collaborator (an audit store
+exposing ``max_events``, see :mod:`app.policies.audit`), both stores
+additionally offer ``set_with_audit`` / ``delete_with_audit``. These
+persist the policy change **and** its audit event atomically:
+
+* Redis: one Lua script reads the authoritative previous document,
+  writes the new state and appends the stream entry in a single
+  execution — a mutation can never succeed while its audit event is
+  silently lost, and the recorded ``previous_policy`` is exactly the
+  document that was replaced (even under concurrent writers).
+* Memory: the same sequence runs under one process lock.
+
 Neither store catches Redis/network exceptions; callers decide how to
 fail (the admin API answers 503, the resolver fails closed).
 """
 
+import dataclasses
 import json
 import threading
 
+from app.policies.audit import (
+    AUDIT_STREAM_KEY,
+    PolicyAuditEvent,
+    stream_fields,
+)
 from app.policies.model import RoutePolicy
 
 
@@ -43,9 +63,10 @@ class PolicyError(RuntimeError):
 class MemoryPolicyStore:
     """Process-local policy store. See module docstring."""
 
-    def __init__(self):
+    def __init__(self, audit=None):
         self._policies = {}
         self._lock = threading.Lock()
+        self.audit = audit
 
     def set(self, policy: RoutePolicy) -> RoutePolicy:
         with self._lock:
@@ -71,12 +92,118 @@ class MemoryPolicyStore:
         with self._lock:
             self._policies.clear()
 
+    # ------------------------------------------- audited mutations
+
+    def _require_audit(self):
+        if self.audit is None:
+            raise TypeError(
+                "set_with_audit/delete_with_audit require an audit "
+                "store collaborator"
+            )
+
+    def set_with_audit(
+        self, policy: RoutePolicy, event: PolicyAuditEvent
+    ) -> RoutePolicy:
+        """Persist the policy and its audit event under one lock.
+
+        The recorded ``previous_policy`` snapshot is the document that
+        was actually replaced, mirroring the Redis behaviour. The audit
+        entry is appended **before** the policy commits: if recording
+        fails, the mutation aborts with no state change (fail closed).
+        """
+        self._require_audit()
+
+        with self._lock:
+            previous = self._policies.get(policy.route)
+            recorded = dataclasses.replace(
+                event,
+                previous_policy=(
+                    previous.to_dict() if previous is not None else None
+                ),
+            )
+            self.audit.append(recorded)
+            self._policies[policy.route] = policy
+
+        return policy
+
+    def delete_with_audit(
+        self, route: str, event: PolicyAuditEvent
+    ) -> bool:
+        """Delete the policy and record the event; False when absent.
+
+        Nothing — not the deletion, not the event — happens when no
+        policy exists for ``route``, or when recording fails.
+        """
+        self._require_audit()
+
+        with self._lock:
+            previous = self._policies.get(route)
+
+            if previous is None:
+                return False
+
+            self.audit.append(
+                dataclasses.replace(
+                    event, previous_policy=previous.to_dict()
+                )
+            )
+            del self._policies[route]
+
+        return True
+
 
 class RedisPolicyStore:
     """Redis-backed policy store shared by every worker and host."""
 
-    def __init__(self, redis_client):
+    # Read the authoritative previous document, write the new state and
+    # append the audit entry in one atomic execution. ARGV:
+    # 1 route, 2 new document JSON, 3 event_id, 4 timestamp (ISO),
+    # 5 operation, 6 actor, 7 audit max events.
+    _SET_WITH_AUDIT = """
+local previous = redis.call('GET', KEYS[1])
+redis.call('SET', KEYS[1], ARGV[2])
+redis.call('SADD', KEYS[2], ARGV[1])
+redis.call('XADD', KEYS[3], '*',
+           'event_id', ARGV[3],
+           'timestamp', ARGV[4],
+           'operation', ARGV[5],
+           'route', ARGV[1],
+           'actor', ARGV[6],
+           'previous_policy', previous or '',
+           'new_policy', ARGV[2])
+redis.call('XTRIM', KEYS[3], 'MAXLEN', tonumber(ARGV[7]))
+return 1
+"""
+
+    # Delete only when a policy exists; record its actual document.
+    _DELETE_WITH_AUDIT = """
+local previous = redis.call('GET', KEYS[1])
+if not previous then
+    return 0
+end
+redis.call('DEL', KEYS[1])
+redis.call('SREM', KEYS[2], ARGV[1])
+redis.call('XADD', KEYS[3], '*',
+           'event_id', ARGV[3],
+           'timestamp', ARGV[4],
+           'operation', ARGV[5],
+           'route', ARGV[1],
+           'actor', ARGV[6],
+           'previous_policy', previous,
+           'new_policy', '')
+redis.call('XTRIM', KEYS[3], 'MAXLEN', tonumber(ARGV[7]))
+return 1
+"""
+
+    def __init__(self, redis_client, audit=None):
         self.redis_client = redis_client
+        self.audit = audit
+        self._set_with_audit_script = self.redis_client.register_script(
+            self._SET_WITH_AUDIT
+        )
+        self._delete_with_audit_script = self.redis_client.register_script(
+            self._DELETE_WITH_AUDIT
+        )
 
     @staticmethod
     def _decode(route: str, raw) -> RoutePolicy:
@@ -140,3 +267,69 @@ class RedisPolicyStore:
             self.redis_client.srem(POLICY_INDEX_KEY, *stale)
 
         return policies
+
+    # ------------------------------------------- audited mutations
+
+    def _require_audit(self):
+        if self.audit is None:
+            raise TypeError(
+                "set_with_audit/delete_with_audit require an audit "
+                "store collaborator"
+            )
+
+    @staticmethod
+    def _audit_argv(event: PolicyAuditEvent):
+        """Event fields shared by both scripts (ARGV 3..6)."""
+        fields = stream_fields(event)
+
+        return [
+            fields["timestamp"],
+            fields["operation"],
+            fields["actor"],
+        ]
+
+    def _script_keys(self, route: str):
+        return [
+            policy_key(route),
+            POLICY_INDEX_KEY,
+            AUDIT_STREAM_KEY,
+        ]
+
+    def set_with_audit(
+        self, policy: RoutePolicy, event: PolicyAuditEvent
+    ) -> RoutePolicy:
+        """Atomically write the policy and its audit entry (Lua).
+
+        The audit entry's ``previous_policy`` is read inside the script,
+        so it always reflects the document that was actually replaced.
+        """
+        self._require_audit()
+
+        document = json.dumps(policy.to_dict())
+
+        self._set_with_audit_script(
+            keys=self._script_keys(policy.route),
+            args=[policy.route, document, event.event_id]
+                 + self._audit_argv(event)
+                 + [self.audit.max_events],
+        )
+
+        return policy
+
+    def delete_with_audit(
+        self, route: str, event: PolicyAuditEvent
+    ) -> bool:
+        """Atomically delete the policy and record the event.
+
+        Returns False — writing nothing at all — when no policy exists.
+        """
+        self._require_audit()
+
+        deleted = self._delete_with_audit_script(
+            keys=self._script_keys(route),
+            args=[route, "", event.event_id]
+                 + self._audit_argv(event)
+                 + [self.audit.max_events],
+        )
+
+        return bool(deleted)

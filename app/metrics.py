@@ -109,6 +109,15 @@ POLICY_UPDATES_TOTAL = Counter(
     ["operation", "outcome"],
 )
 
+# Audit trail for dynamic policy changes: one counter increment per
+# audit event persisted (success) or failed to persist (error).
+# Bounded labels only — operation is create/update/delete.
+POLICY_AUDIT_EVENTS_TOTAL = Counter(
+    "rateguard_policy_audit_events_total",
+    "Dynamic rate-limit policy audit events.",
+    ["operation", "outcome"],
+)
+
 
 def registry():
     """Return the collector registry to scrape.
@@ -186,6 +195,14 @@ def observe_utilization(route: str, remaining: int, limit: int) -> None:
 def record_policy_operation(operation: str, outcome: str) -> None:
     """Count one policy management operation (bounded label values)."""
     POLICY_UPDATES_TOTAL.labels(
+        operation=operation,
+        outcome=outcome,
+    ).inc()
+
+
+def record_policy_audit_event(operation: str, outcome: str) -> None:
+    """Count one audit event outcome (bounded label values)."""
+    POLICY_AUDIT_EVENTS_TOTAL.labels(
         operation=operation,
         outcome=outcome,
     ).inc()

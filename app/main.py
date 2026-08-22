@@ -3,17 +3,34 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.api_keys import ApiKeyStore, RedisApiKeyStore
 from app.config import parse_route_limits
-from app.metrics import metrics_body, record_policy_operation
+from app.metrics import (
+    metrics_body,
+    record_policy_audit_event,
+    record_policy_operation,
+)
 from app.middleware.rate_limiter import RateLimiter
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
 from app.playground import simulation as playground_sim
+from app.policies.audit import (
+    AUDIT_OPERATIONS,
+    MemoryAuditStore,
+    RedisAuditStore,
+    new_event as new_audit_event,
+)
 from app.policies.model import (
     RoutePolicy,
     normalize_policy_payload,
@@ -108,6 +125,20 @@ API_KEY_STORE_PATH = os.getenv(
     "api_keys.json"
 )
 
+# Bounded retention for the policy audit trail (newest events kept).
+AUDIT_MAX_EVENTS = _env_int("RATE_LIMIT_AUDIT_MAX_EVENTS", "1000")
+
+if AUDIT_MAX_EVENTS < 1:
+    raise RuntimeError(
+        f"RATE_LIMIT_AUDIT_MAX_EVENTS must be >= 1, got {AUDIT_MAX_EVENTS}"
+    )
+
+if AUDIT_MAX_EVENTS > 1_000_000:
+    raise RuntimeError(
+        "RATE_LIMIT_AUDIT_MAX_EVENTS must be <= 1000000, "
+        f"got {AUDIT_MAX_EVENTS}"
+    )
+
 PLAYGROUND_STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN")
@@ -148,6 +179,16 @@ else:
     # Process-local by design: memory-mode policies are NOT shared
     # between workers and do not survive restarts.
     policy_store = MemoryPolicyStore()
+
+
+# Audit trail for dynamic policy changes. Redis mode shares one bounded
+# stream across every worker; memory mode is process-local and ephemeral.
+if RATE_LIMIT_BACKEND == "redis":
+    policy_audit_store = RedisAuditStore(redis, max_events=AUDIT_MAX_EVENTS)
+else:
+    policy_audit_store = MemoryAuditStore(max_events=AUDIT_MAX_EVENTS)
+
+policy_store.audit = policy_audit_store
 
 
 policy_resolver = PolicyResolver(
@@ -424,6 +465,22 @@ def _policies_from_store(operation):
         raise PolicyUnavailable() from exc
 
 
+def _audited_write(write, operation: str):
+    """Run a combined policy+audit write, marking audit failures.
+
+    The write is atomic (single Lua execution on Redis, single lock in
+    memory mode): either the policy change and its audit event both
+    persist, or neither does. Any failure surfaces as 503 via
+    ``PolicyUnavailable`` — a successful policy change is never
+    reported while its audit event was silently lost.
+    """
+    try:
+        return write()
+    except Exception as exc:
+        record_policy_audit_event(operation, "error")
+        raise PolicyUnavailable() from exc
+
+
 @app.get("/admin/rate-limits", dependencies=[Depends(admin_required)])
 def list_rate_limits():
     """List every route with its effective limit and its source.
@@ -450,6 +507,51 @@ def list_rate_limits():
         "global": {"limit": limit, "window": window},
         "routes": routes,
         "policies": [policy.to_dict() for policy in policies],
+    }
+
+
+@app.get(
+    "/admin/rate-limits/audit",
+    dependencies=[Depends(admin_required)]
+)
+def list_policy_audit_history(
+    limit: int = Query(50, ge=1, le=500),
+    route: str | None = None,
+    operation: str | None = None,
+):
+    """Recent dynamic policy audit events (newest first).
+
+    Optional exact-match filters: ``route`` (must start with "/") and
+    ``operation`` (create | update | delete). Reads stay bounded: at
+    most a small recent window of the stream is examined per call.
+    """
+    safe_route = None
+
+    if route is not None:
+        try:
+            safe_route = validate_route(route)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if operation is not None and operation not in AUDIT_OPERATIONS:
+        allowed = ", ".join(sorted(AUDIT_OPERATIONS))
+        raise HTTPException(
+            status_code=422,
+            detail=f"operation must be one of {allowed}",
+        )
+
+    try:
+        events = policy_audit_store.list(
+            limit=limit,
+            route=safe_route,
+            operation=operation,
+        )
+    except Exception as exc:
+        raise PolicyUnavailable() from exc
+
+    return {
+        "events": [event.to_dict() for event in events],
+        "count": len(events),
     }
 
 
@@ -522,7 +624,16 @@ def create_rate_limit(body: dict):
             enabled=fields.get("enabled", True),
         )
 
-        policy_resolver.store.set(policy)
+        event = new_audit_event(
+            "create",
+            safe,
+            previous_policy=None,
+            new_policy=policy.to_dict(),
+        )
+        _audited_write(
+            lambda: policy_resolver.store.set_with_audit(policy, event),
+            "create",
+        )
         policy_resolver.invalidate(policy.route)
     except HTTPException:
         raise
@@ -537,6 +648,7 @@ def create_rate_limit(body: dict):
         raise PolicyUnavailable() from exc
 
     record_policy_operation("set", "success")
+    record_policy_audit_event("create", "success")
 
     return policy.to_dict()
 
@@ -576,7 +688,16 @@ def update_rate_limit(route: str, body: dict):
 
         policy = RoutePolicy.from_dict(merged)
 
-        policy_resolver.store.set(policy)
+        event = new_audit_event(
+            "update",
+            safe,
+            previous_policy=existing.to_dict(),
+            new_policy=policy.to_dict(),
+        )
+        _audited_write(
+            lambda: policy_resolver.store.set_with_audit(policy, event),
+            "update",
+        )
         policy_resolver.invalidate(policy.route)
     except HTTPException:
         raise
@@ -594,6 +715,7 @@ def update_rate_limit(route: str, body: dict):
         raise PolicyUnavailable() from exc
 
     record_policy_operation("set", "success")
+    record_policy_audit_event("update", "success")
 
     return policy.to_dict()
 
@@ -608,8 +730,13 @@ def delete_rate_limit(route: str):
     fallback (RATE_LIMIT_ROUTES or the global default)."""
     safe = _policy_route(route)
 
+    event = new_audit_event("delete", safe)
+
     try:
-        deleted = policy_resolver.delete_policy(safe)
+        deleted = _audited_write(
+            lambda: policy_resolver.store.delete_with_audit(safe, event),
+            "delete",
+        )
     except Exception as exc:
         record_policy_operation("delete", "error")
         raise PolicyUnavailable() from exc
@@ -621,7 +748,9 @@ def delete_rate_limit(route: str):
             detail=f"No dynamic policy for {safe!r}",
         )
 
+    policy_resolver.invalidate(safe)
     record_policy_operation("delete", "success")
+    record_policy_audit_event("delete", "success")
 
 
 @app.exception_handler(PolicyUnavailable)

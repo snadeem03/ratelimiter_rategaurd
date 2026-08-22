@@ -37,7 +37,9 @@ def client():
 def _wire(monkeypatch, algorithm="sliding_window", storage=None,
           cache_ttl=0.05):
     """Wire a fresh resolver + limiter into the app for a test."""
-    store = MemoryPolicyStore()
+    from app.policies.audit import MemoryAuditStore
+
+    store = MemoryPolicyStore(audit=MemoryAuditStore(max_events=100))
     resolver = PolicyResolver(
         store=store,
         static_route_limits=STATIC_ROUTES,
@@ -635,11 +637,15 @@ class TestRedisPolicySharing:
     def test_concurrent_updates_via_http(self, client, monkeypatch):
         redis = _redis()
         from app.core.redis_client import get_redis
+        from app.policies.audit import RedisAuditStore
         from app.policies.store import RedisPolicyStore
 
         _cleanup(get_redis(), "polhttp")
 
-        policy_store = RedisPolicyStore(get_redis())
+        policy_store = RedisPolicyStore(
+            get_redis(),
+            audit=RedisAuditStore(get_redis(), max_events=100),
+        )
         resolver = PolicyResolver(
             store=policy_store,
             static_route_limits=STATIC_ROUTES,
