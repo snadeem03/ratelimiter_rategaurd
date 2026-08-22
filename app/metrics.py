@@ -100,6 +100,15 @@ RATE_LIMIT_UTILIZATION = Gauge(
     multiprocess_mode="livemax",
 )
 
+# Runtime policy management. Labels are bounded by construction:
+# operation is one of set/delete/read and outcome success/error —
+# route paths are never used as label values.
+POLICY_UPDATES_TOTAL = Counter(
+    "rateguard_policy_updates_total",
+    "Dynamic rate-limit policy management operations.",
+    ["operation", "outcome"],
+)
+
 
 def registry():
     """Return the collector registry to scrape.
@@ -172,3 +181,11 @@ def observe_utilization(route: str, remaining: int, limit: int) -> None:
     RATE_LIMIT_UTILIZATION.labels(route=route).set(
         max(0.0, min(1.0, 1.0 - remaining / limit))
     )
+
+
+def record_policy_operation(operation: str, outcome: str) -> None:
+    """Count one policy management operation (bounded label values)."""
+    POLICY_UPDATES_TOTAL.labels(
+        operation=operation,
+        outcome=outcome,
+    ).inc()

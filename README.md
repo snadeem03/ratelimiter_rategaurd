@@ -11,7 +11,7 @@ A distributed API rate-limiting service built with **FastAPI + Redis** — four 
 
 ## Contents
 
-[Overview](#overview) · [Why RateGuard](#why-rateguard) · [Features](#feature-highlights) · [Architecture](#architecture) · [Algorithms](#algorithms) · [Distributed design](#redis--distributed-design) · [Headers](#rate-limit-headers) · [API keys](#api-key-management) · [Playground](#interactive-playground) · [Quick start](#quick-start) · [Configuration](#configuration) · [API examples](#api-examples) · [Observability](#observability) · [Benchmarking](#benchmarking) · [Testing & CI](#testing-and-ci) · [Docker](#docker-architecture) · [Security](#security) · [Structure](#project-structure) · [Release](#release)
+[Overview](#overview) · [Why RateGuard](#why-rateguard) · [Features](#feature-highlights) · [Architecture](#architecture) · [Algorithms](#algorithms) · [Distributed design](#redis--distributed-design) · [Headers](#rate-limit-headers) · [API keys](#api-key-management) · [Playground](#interactive-playground) · [Quick start](#quick-start) · [Configuration](#configuration) · [Dynamic policies](#dynamic-rate-limit-policies) · [API examples](#api-examples) · [Observability](#observability) · [Benchmarking](#benchmarking) · [Testing & CI](#testing-and-ci) · [Docker](#docker-architecture) · [Security](#security) · [Structure](#project-structure) · [Release](#release)
 
 ---
 
@@ -52,7 +52,7 @@ Also included:
 | Capability | What you get |
 |---|---|
 | API-key management | `rg_live_*` keys, SHA-256 hashed at rest, one-time secret display, revoke/expire |
-| Admin API | `/admin/api-keys` CRUD guarded by `X-Admin-Token` (disabled unless configured) |
+| Admin API | `/admin/api-keys` + runtime `/admin/rate-limits` policies, guarded by `X-Admin-Token` (disabled unless configured) |
 | Rate-limit headers | `X-RateLimit-Limit/Remaining/Reset` everywhere; `Retry-After` on 429 |
 | Playground | Browser UI driving the real algorithms, simulation + live-API modes |
 | Observability | Prometheus metrics + auto-provisioned Grafana dashboard |
@@ -218,6 +218,74 @@ All configuration is environment-based (see [`.env.example`](.env.example)); eve
 | `API_KEY_STORE_PATH` | `api_keys.json` | JSON store path (memory backend) |
 
 Invalid values abort startup with a clear error naming the variable — misconfiguration never surfaces as a runtime failure. Never commit `.env` or real tokens.
+
+## Dynamic Rate-Limit Policies
+
+Route limits can be changed **at runtime** — without restarting RateGuard, its workers, or the Docker stack.
+
+**Static vs runtime configuration.** The environment variables above (`RATE_LIMIT_ROUTES`, `RATE_LIMIT`, `RATE_LIMIT_WINDOW`) are read once at startup and never change while running. On top of them, admins can manage *dynamic policies* per route through the admin API. Effective configuration is resolved per request with this precedence:
+
+```
+runtime dynamic policy   (admin API)
+        ↓  if none for the route
+RATE_LIMIT_ROUTES        (static)
+        ↓  if not listed
+global RATE_LIMIT / RATE_LIMIT_WINDOW
+```
+
+A **disabled** dynamic policy (`enabled: false`) does not block the chain — the route falls back to static/global exactly as if no policy existed. Deleting a policy restores its configured fallback; a route can never be made unlimited by mistake.
+
+### Admin API
+
+All endpoints require `X-Admin-Token` matching `ADMIN_API_TOKEN` (same protection as the API-key admin: missing/wrong/unconfigured token → `403`). Routes contain `/`, so URL paths use the full route suffix:
+
+```bash
+# List every route with its effective limit and where it comes from
+curl http://localhost:8000/admin/rate-limits \
+  -H "X-Admin-Token: <ADMIN_API_TOKEN>"
+
+# Create a policy (409 if one already exists for the route)
+curl -X POST http://localhost:8000/admin/rate-limits \
+  -H "X-Admin-Token: <ADMIN_API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"route":"/api/orders","limit":30,"window":60}'
+
+# Update it (partial updates allowed; 404 if no dynamic policy exists)
+curl -X PUT http://localhost:8000/admin/rate-limits/api/orders \
+  -H "X-Admin-Token: <ADMIN_API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"limit":50}'
+
+# Remove it — /api/orders returns to its configured fallback
+curl -X DELETE http://localhost:8000/admin/rate-limits/api/orders \
+  -H "X-Admin-Token: <ADMIN_API_TOKEN>"
+```
+
+Malformed policies are rejected with `422`: routes must be safe exact-match paths (leading `/`, no `.`, `..`, whitespace or control characters), `limit`/`window` must be integers ≥ 1, duplicates rejected on create.
+
+### Policy update behavior
+
+Updates take effect on subsequent requests immediately on the worker that handled the update, and within **2 seconds** (cache TTL) on every other worker — no restarts anywhere.
+
+Existing rate-limit state is **preserved**, never wiped:
+
+- raising `/api/orders` from 5/min to 10/min lets exactly five more requests through in the current window;
+- tightening back to 5/min rejects immediately until in-window requests age out;
+- token buckets keep their drained tokens (only refill pacing recovers); leaky buckets gain free queue slots when capacity grows.
+
+This is enforced by re-tuning live limiter instances (limit/window/capacity/rate) rather than deleting algorithm state.
+
+### Redis synchronization
+
+With `RATE_LIMIT_BACKEND=redis`, policies live in Redis under `rateguard:policy:<route>` (JSON documents written atomically via `SET`; an index set tracks all routes). Every uvicorn worker reads the same state, updates propagate to all of them, and policies survive container restarts. Readers only ever see complete documents — concurrent updates cannot surface partial data.
+
+With the default `memory` backend, policies are stored **in-process**: they are visible only to the single process that created them, are NOT shared between multiple workers, and do not survive a restart. Memory mode does not provide distributed configuration.
+
+If Redis becomes unavailable, policy operations return `503 {"error": "Redis unavailable"}` and enforcement fails closed — rate limiting never gets bypassed because policy storage is down.
+
+### Observability
+
+Policy management increments `rateguard_policy_updates_total{operation,outcome}` (bounded labels: `set|delete|list|read × success|error`). Route paths are never used as metric labels.
 
 ## API examples
 

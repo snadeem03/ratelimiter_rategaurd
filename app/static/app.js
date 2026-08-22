@@ -166,6 +166,17 @@ function renderServerConfig() {
 }
 
 function routeLimitText(s) {
+  // Runtime-managed policy overrides (see admin API); shown as the
+  // effective limit when one exists for the selected route.
+  const policies = s.dynamic_policies;
+  if (Array.isArray(policies)) {
+    const dyn = policies.find(function (p) { return p.route === state.route; });
+    if (dyn) {
+      return dyn.enabled
+        ? 'dynamic ' + dyn.limit + ' req / ' + dyn.window + 's'
+        : 'policy disabled';
+    }
+  }
   const cfg = s.route_limits && s.route_limits[state.route];
   if (cfg) return cfg.limit + ' req / ' + cfg.window + 's';
   return 'global ' + s.limit + ' req / ' + s.window + 's';
