@@ -240,6 +240,8 @@ A **disabled** dynamic policy (`enabled: false`) does not block the chain — th
 
 All endpoints require `X-Admin-Token` matching `ADMIN_API_TOKEN` (same protection as the API-key admin: missing/wrong/unconfigured token → `403`). Routes contain `/`, so URL paths use the full route suffix:
 
+> **Windows PowerShell:** `curl` may resolve to PowerShell's own web-request command depending on your environment. Use the PowerShell examples below, or invoke native curl explicitly as `curl.exe`. Multiline PowerShell continues with a backtick (`` ` ``), not Bash's `\`.
+
 ```bash
 # List every route with its effective limit and where it comes from
 curl http://localhost:8000/admin/rate-limits \
@@ -260,6 +262,50 @@ curl -X PUT http://localhost:8000/admin/rate-limits/api/orders \
 # Remove it — /api/orders returns to its configured fallback
 curl -X DELETE http://localhost:8000/admin/rate-limits/api/orders \
   -H "X-Admin-Token: <ADMIN_API_TOKEN>"
+```
+
+The same operations in PowerShell (`$headers` is reused by every example):
+
+```powershell
+# Shared by all admin examples below
+$headers = @{
+    "X-Admin-Token" = "<ADMIN_API_TOKEN>"
+    "Content-Type"  = "application/json"
+}
+
+# List every route with its effective limit and where it comes from
+Invoke-RestMethod `
+    -Uri "http://localhost:8000/admin/rate-limits" `
+    -Headers $headers
+
+# Create a policy (409 if one already exists for the route)
+$body = @{
+    route   = "/api/orders"
+    limit   = 30
+    window  = 60
+    enabled = $true
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+    -Uri "http://localhost:8000/admin/rate-limits" `
+    -Method Post `
+    -Headers $headers `
+    -Body $body
+
+# Update it (partial updates allowed; 404 if no dynamic policy exists)
+$body = @{ limit = 50 } | ConvertTo-Json
+
+Invoke-RestMethod `
+    -Uri "http://localhost:8000/admin/rate-limits/api/orders" `
+    -Method Put `
+    -Headers $headers `
+    -Body $body
+
+# Remove it — /api/orders returns to its configured fallback (204)
+Invoke-RestMethod `
+    -Uri "http://localhost:8000/admin/rate-limits/api/orders" `
+    -Method Delete `
+    -Headers $headers
 ```
 
 Malformed policies are rejected with `422`: routes must be safe exact-match paths (leading `/`, no `.`, `..`, whitespace or control characters), `limit`/`window` must be integers ≥ 1, duplicates rejected on create.
@@ -319,6 +365,21 @@ curl "http://localhost:8000/admin/rate-limits/audit?limit=20&operation=update" \
 
 curl "http://localhost:8000/admin/rate-limits/audit?route=/api/orders" \
   -H "X-Admin-Token: <ADMIN_API_TOKEN>"
+```
+
+PowerShell:
+
+```powershell
+$headers = @{ "X-Admin-Token" = "<ADMIN_API_TOKEN>" }
+
+# Recent events, newest first (limit ≤ 500; optional route/operation filters)
+Invoke-RestMethod `
+    -Uri "http://localhost:8000/admin/rate-limits/audit?limit=20&operation=update" `
+    -Headers $headers
+
+Invoke-RestMethod `
+    -Uri "http://localhost:8000/admin/rate-limits/audit?route=/api/orders" `
+    -Headers $headers
 ```
 
 Same protection as every admin endpoint: missing/wrong/unconfigured `X-Admin-Token` → `403`. Responses contain no tokens, API keys, hashes, credentials, or client IPs.
