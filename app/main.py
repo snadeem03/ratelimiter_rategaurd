@@ -52,10 +52,14 @@ from app.policies.store import (
 load_dotenv()
 
 
+# Single source of truth for the application version.
+APP_VERSION = "1.1.0"
+
+
 app = FastAPI(
     title="RateGuard",
     description="API Rate Limiting Gateway",
-    version="1.1.0"
+    version=APP_VERSION
 )
 
 
@@ -258,7 +262,7 @@ def _remaining(request: Request) -> int:
 def root():
     return {
         "message": "RateGuard is running",
-        "version": "1.1.0",
+        "version": APP_VERSION,
         "algorithm": algorithm
     }
 
@@ -816,7 +820,7 @@ def playground_api_config():
             dynamic_policies = None
 
     return {
-        "version": "1.1.0",
+        "version": APP_VERSION,
         "algorithm": algorithm,
         "backend": RATE_LIMIT_BACKEND,
         "limit": limit,

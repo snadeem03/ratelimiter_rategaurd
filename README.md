@@ -400,7 +400,7 @@ Numbers depend heavily on hardware and topology, so this README deliberately pub
 ## Testing and CI
 
 ```bash
-python -m pytest -v     # 323 tests
+python -m pytest -v     # 468 tests
 ```
 
 - Redis-backed tests execute against a **real Redis** and skip cleanly when none is running locally.
@@ -440,7 +440,7 @@ app/
   playground/                 # simulation engine (real algorithms)
   static/                     # playground frontend
 prometheus/, grafana/         # observability provisioning
-tests/                        # 323 tests
+tests/                        # 468 tests
 benchmark/                    # CLI benchmark system
 Dockerfile, docker-compose.yml
 .env.example                  # safe configuration template
@@ -448,7 +448,7 @@ Dockerfile, docker-compose.yml
 
 ## Release
 
-**RateGuard v1.0.0** — see [releases](https://github.com/snadeem03/ratelimiter_rategaurd/releases). A production-oriented rate-limiting service for local development, testing, and deployment. Distributed enforcement verified across workers, startup-fail-fast configuration, hardened admin auth, full test suite green in CI.
+**RateGuard v1.1.0** — see [releases](https://github.com/snadeem03/ratelimiter_rategaurd/releases). A production-oriented rate-limiting service for local development, testing, and deployment. v1.1.0 adds dynamic distributed rate-limit policies (runtime CRUD via the admin API with bounded cross-worker convergence) and an append-only policy audit history with bounded retention and atomic policy+audit persistence on Redis; distributed enforcement, startup-fail-fast configuration, hardened admin auth, and the full test suite remain verified in CI.
 
 ## Future work
 
