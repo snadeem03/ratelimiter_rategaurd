@@ -10,10 +10,26 @@ from pydantic import BaseModel
 
 from app.api_keys import ApiKeyStore, RedisApiKeyStore
 from app.config import parse_route_limits
-from app.metrics import metrics_body
+from app.metrics import metrics_body, record_policy_operation
 from app.middleware.rate_limiter import RateLimiter
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
 from app.playground import simulation as playground_sim
+from app.policies.model import (
+    RoutePolicy,
+    normalize_policy_payload,
+    validate_route,
+)
+from app.policies.resolver import (
+    PolicyResolver,
+    SOURCE_DYNAMIC,
+    SOURCE_GLOBAL,
+    SOURCE_STATIC,
+)
+from app.policies.store import (
+    MemoryPolicyStore,
+    PolicyError,
+    RedisPolicyStore,
+)
 
 
 load_dotenv()
@@ -119,11 +135,27 @@ if RATE_LIMIT_BACKEND == "redis":
         prefix=API_KEY_PREFIX
     )
 
+    # Dynamic policies live in Redis so every worker observes the same
+    # runtime configuration. No TTL: they persist until deleted.
+    policy_store = RedisPolicyStore(redis)
+
 else:
     api_key_store = ApiKeyStore(
         path=API_KEY_STORE_PATH,
         prefix=API_KEY_PREFIX
     )
+
+    # Process-local by design: memory-mode policies are NOT shared
+    # between workers and do not survive restarts.
+    policy_store = MemoryPolicyStore()
+
+
+policy_resolver = PolicyResolver(
+    store=policy_store,
+    static_route_limits=route_limits,
+    global_limit=limit,
+    global_window=window,
+)
 
 
 rate_limiter = RateLimiter(
@@ -131,7 +163,8 @@ rate_limiter = RateLimiter(
     limit=limit,
     window=window,
     storage=storage,
-    route_limits=route_limits
+    route_limits=route_limits,
+    policy_resolver=policy_resolver,
 )
 
 
@@ -334,6 +367,272 @@ def delete_api_key(key_id: str):
         )
 
 
+# --------------------------------------------------------------- policies
+# Runtime-managed rate-limit policies. Routes contain "/" characters, so
+# the path parameter uses Starlette's ``:path`` converter, e.g.
+# PUT /admin/rate-limits/api/orders  ->  route = "/api/orders".
+
+
+class PolicyUnavailable(Exception):
+    """Raised when the policy store cannot be reached."""
+
+
+def _policy_route(route: str, from_url: bool = True) -> str:
+    """Validate a route; ValueError -> 422.
+
+    Starlette's ``:path`` converter consumes the separator after
+    ``/admin/rate-limits``, so URL-captured values arrive without
+    their leading ``/`` and it is restored here. Routes taken from a
+    request body must already start with ``/``.
+    """
+    candidate = route
+
+    if from_url and isinstance(route, str) and not route.startswith("/"):
+        candidate = f"/{route}"
+
+    try:
+        return validate_route(candidate)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _policy_entry(route: str) -> dict:
+    """Build the effective-config view for one route."""
+    try:
+        effective = policy_resolver.effective(route)
+    except Exception as exc:
+        raise PolicyUnavailable() from exc
+
+    entry = {
+        "limit": effective.limit,
+        "window": effective.window,
+        "source": effective.source,
+    }
+
+    if effective.policy is not None:
+        entry["policy"] = effective.policy.to_dict()
+
+    return entry
+
+
+def _policies_from_store(operation):
+    """Run a read against the policy store, mapping failures."""
+    try:
+        return policy_resolver.list_policies()
+    except Exception as exc:
+        record_policy_operation(operation, "error")
+        raise PolicyUnavailable() from exc
+
+
+@app.get("/admin/rate-limits", dependencies=[Depends(admin_required)])
+def list_rate_limits():
+    """List every route with its effective limit and its source.
+
+    ``routes`` merges static configuration with dynamic policies under
+    the documented precedence (dynamic > static > global); ``policies``
+    lists the raw runtime-managed policies.
+    """
+    policies = _policies_from_store("list")
+
+    routes = {
+        route: {
+            "limit": config["limit"],
+            "window": config["window"],
+            "source": SOURCE_STATIC,
+        }
+        for route, config in sorted(route_limits.items())
+    }
+
+    for policy in policies:
+        routes[policy.route] = _policy_entry(policy.route)
+
+    return {
+        "global": {"limit": limit, "window": window},
+        "routes": routes,
+        "policies": [policy.to_dict() for policy in policies],
+    }
+
+
+@app.get(
+    "/admin/rate-limits/{route:path}",
+    dependencies=[Depends(admin_required)]
+)
+def get_rate_limit(route: str):
+    """Show the effective configuration for one route."""
+    safe = _policy_route(route)
+
+    return _policy_entry(safe)
+
+
+@app.post("/admin/rate-limits", status_code=201,
+          dependencies=[Depends(admin_required)])
+def create_rate_limit(body: dict):
+    """Create a route policy. Duplicate routes are rejected (409)."""
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="request body must be a JSON object",
+        )
+
+    unknown = set(body) - {"route", "limit", "window", "enabled"}
+
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail="unknown fields: " + ", ".join(sorted(unknown)),
+        )
+
+    if "route" not in body:
+        raise HTTPException(status_code=422, detail="route is required")
+
+    safe = _policy_route(body["route"], from_url=False)
+
+    try:
+        fields = normalize_policy_payload({
+            key: value for key, value in body.items()
+            if key in ("limit", "window", "enabled")
+        })
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if "limit" not in fields or "window" not in fields:
+        missing = [
+            name for name in ("limit", "window") if name not in fields
+        ]
+        raise HTTPException(
+            status_code=422,
+            detail=f"missing required fields: {', '.join(missing)}",
+        )
+
+    try:
+        if policy_resolver.get_stored(safe) is not None:
+            record_policy_operation("set", "error")
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"A policy for {safe!r} already exists; "
+                    "use PUT to update it"
+                ),
+            )
+
+        policy = RoutePolicy(
+            route=safe,
+            limit=fields["limit"],
+            window=fields["window"],
+            enabled=fields.get("enabled", True),
+        )
+
+        policy_resolver.store.set(policy)
+        policy_resolver.invalidate(policy.route)
+    except HTTPException:
+        raise
+    except PolicyError:
+        record_policy_operation("set", "error")
+        raise HTTPException(
+            status_code=500,
+            detail="Stored policy data is malformed",
+        ) from None
+    except Exception as exc:
+        record_policy_operation("set", "error")
+        raise PolicyUnavailable() from exc
+
+    record_policy_operation("set", "success")
+
+    return policy.to_dict()
+
+
+@app.put(
+    "/admin/rate-limits/{route:path}",
+    dependencies=[Depends(admin_required)]
+)
+def update_rate_limit(route: str, body: dict):
+    """Update an existing route policy (partial updates allowed)."""
+    safe = _policy_route(route)
+
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="request body must be a JSON object",
+        )
+
+    try:
+        fields = normalize_policy_payload(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        existing = policy_resolver.get_stored(safe)
+
+        if existing is None:
+            record_policy_operation("set", "error")
+            raise HTTPException(
+                status_code=404,
+                detail=f"No dynamic policy for {safe!r}; "
+                       "use POST to create one",
+            )
+
+        merged = existing.to_dict()
+        merged.update(fields)
+
+        policy = RoutePolicy.from_dict(merged)
+
+        policy_resolver.store.set(policy)
+        policy_resolver.invalidate(policy.route)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        record_policy_operation("set", "error")
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PolicyError:
+        record_policy_operation("set", "error")
+        raise HTTPException(
+            status_code=500,
+            detail="Stored policy data is malformed",
+        ) from None
+    except Exception as exc:
+        record_policy_operation("set", "error")
+        raise PolicyUnavailable() from exc
+
+    record_policy_operation("set", "success")
+
+    return policy.to_dict()
+
+
+@app.delete(
+    "/admin/rate-limits/{route:path}",
+    status_code=204,
+    dependencies=[Depends(admin_required)]
+)
+def delete_rate_limit(route: str):
+    """Remove a dynamic policy; the route returns to its configured
+    fallback (RATE_LIMIT_ROUTES or the global default)."""
+    safe = _policy_route(route)
+
+    try:
+        deleted = policy_resolver.delete_policy(safe)
+    except Exception as exc:
+        record_policy_operation("delete", "error")
+        raise PolicyUnavailable() from exc
+
+    if not deleted:
+        record_policy_operation("delete", "error")
+        raise HTTPException(
+            status_code=404,
+            detail=f"No dynamic policy for {safe!r}",
+        )
+
+    record_policy_operation("delete", "success")
+
+
+@app.exception_handler(PolicyUnavailable)
+async def policy_unavailable_handler(request, exc: PolicyUnavailable):
+    """Policy storage outages fail clearly (503), never silently."""
+    return JSONResponse(
+        status_code=503,
+        content={"error": "Redis unavailable"},
+    )
+
+
 class PlaygroundSimCreate(BaseModel):
     algorithm: str
     limit: int = 10
@@ -370,6 +669,23 @@ def playground_api_config():
     except Exception:
         redis_ok = False
 
+    # Small integration: surface the runtime-managed policies so the
+    # playground can display the effective configuration. A store
+    # outage simply omits the field (read-only display, not enforcement).
+    dynamic_policies = None
+
+    if RATE_LIMIT_BACKEND != "redis":
+        dynamic_policies = [
+            p.to_dict() for p in policy_resolver.list_policies()
+        ]
+    else:
+        try:
+            dynamic_policies = [
+                p.to_dict() for p in policy_resolver.list_policies()
+            ]
+        except Exception:
+            dynamic_policies = None
+
     return {
         "version": "1.1.0",
         "algorithm": algorithm,
@@ -377,6 +693,7 @@ def playground_api_config():
         "limit": limit,
         "window": window,
         "route_limits": route_limits,
+        "dynamic_policies": dynamic_policies,
         "api_key_prefix": API_KEY_PREFIX,
         "trust_proxy_headers": TRUST_PROXY_HEADERS,
         "redis": {

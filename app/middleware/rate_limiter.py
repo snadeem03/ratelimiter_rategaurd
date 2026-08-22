@@ -24,6 +24,7 @@ class RateLimiter:
         key_ttl: float = 3_600,
         storage=None,
         route_limits: dict = None,
+        policy_resolver=None,
     ):
         self.limit = limit
         self.window = window
@@ -32,6 +33,9 @@ class RateLimiter:
         self.key_ttl = key_ttl
         self._storage = storage
         self._route_limits = route_limits or {}
+        # Optional dynamic-policy resolver; when present it decides
+        # (limit, window) for every route (dynamic > static > global).
+        self._policy_resolver = policy_resolver
 
         # internal key -> (limiter, last_seen_monotonic)
         self._limiters = OrderedDict()
@@ -45,7 +49,14 @@ class RateLimiter:
 
     def _route_config(self, route):
         """Resolve (limit, window) for a route, falling back to the
-        global default when the route has no specific configuration."""
+        global default when the route has no specific configuration.
+
+        With a policy resolver wired, dynamic policies take precedence
+        over static route limits and global defaults.
+        """
+        if self._policy_resolver is not None:
+            return self._policy_resolver.resolve(route)
+
         if route is None:
             return self.limit, self.window
 
@@ -57,11 +68,35 @@ class RateLimiter:
         return config["limit"], config["window"]
 
     @staticmethod
-    def _internal_key(key: str, route):
+    def _internal_key(key: str, route=None):
         if route is None:
             return key
 
         return f"{route}:{key}"
+
+    @staticmethod
+    def _retune(limiter, limit: int, window: int):
+        """Apply a changed policy to an existing limiter in place.
+
+        Window algorithms keep their recorded state (timestamps /
+        counters) and simply enforce the new limit against it; bucket
+        algorithms get the new capacity and rate. Redis-backed
+        implementations read these attributes on every call, so the
+        change applies immediately while shared state is preserved.
+        """
+        if hasattr(limiter, "capacity"):
+            limiter.capacity = limit
+
+            if hasattr(limiter, "refill_rate"):
+                limiter.refill_rate = limit / window
+
+            if hasattr(limiter, "leak_rate"):
+                limiter.leak_rate = limit / window
+        else:
+            limiter.limit = limit
+            limiter.window = window
+
+        limiter._rg_tuned = (limit, window)
 
     def _get_limiter(self, key: str, route=None):
         limit, window = self._route_config(route)
@@ -73,8 +108,16 @@ class RateLimiter:
             entry = self._limiters.pop(internal_key, None)
 
             if entry is not None and now - entry[1] < self.key_ttl:
+                limiter = entry[0]
                 self._limiters[internal_key] = entry
-                return entry[0]
+
+                # A runtime policy update must affect subsequent
+                # requests: retune cached instances whose resolved
+                # configuration no longer matches.
+                if getattr(limiter, "_rg_tuned", None) != (limit, window):
+                    self._retune(limiter, limit, window)
+
+                return limiter
 
             limiter = create_rate_limiter(
                 algorithm=self.algorithm,
@@ -83,6 +126,8 @@ class RateLimiter:
                 storage=self._storage,
                 client_id=internal_key,
             )
+
+            limiter._rg_tuned = (limit, window)
 
             self._limiters[internal_key] = (limiter, now)
 

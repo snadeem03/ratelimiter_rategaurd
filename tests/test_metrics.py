@@ -19,9 +19,20 @@ METRIC_NAMES = {
     "rateguard_rate_limit_requests_total",
     "rateguard_http_request_duration_seconds",
     "rateguard_rate_limit_utilization",
+    "rateguard_policy_updates_total",
 }
 
-ALLOWED_LABELS = {"route", "status", "decision", "algorithm", "backend"}
+# ``operation``/``outcome`` belong to rateguard_policy_updates_total and
+# are strictly bounded (set|delete|list|read x success|error).
+ALLOWED_LABELS = {
+    "route",
+    "status",
+    "decision",
+    "algorithm",
+    "backend",
+    "operation",
+    "outcome",
+}
 
 FORBIDDEN_LABELS = {
     "client",
