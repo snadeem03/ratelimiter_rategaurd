@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/snadeem03/ratelimiter_rategaurd/actions/workflows/ci.yml/badge.svg)](https://github.com/snadeem03/ratelimiter_rategaurd/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/snadeem03/ratelimiter_rategaurd)](https://github.com/snadeem03/ratelimiter_rategaurd/releases)
-[![Tests](https://img.shields.io/badge/tests-564%20passing-brightgreen)](#testing-and-ci)
+[![Tests](https://img.shields.io/badge/tests-570%20passing-brightgreen)](#testing-and-ci)
 ![Python](https://img.shields.io/badge/python-3.12-blue?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-teal?logo=fastapi&logoColor=white)
 ![Redis](https://img.shields.io/badge/Redis-d82c20?logo=redis&logoColor=white)
@@ -184,7 +184,15 @@ Admin endpoints require `X-Admin-Token` matching `ADMIN_API_TOKEN` (constant-tim
 
 ## Interactive playground
 
-Open **[`/playground`](http://localhost:8000/playground)** while the app is running. It's served by RateGuard itself — same origin, no CORS, nothing leaves your machine.
+The Playground is an interactive browser UI, served by RateGuard itself, for exploring how its rate limiting actually behaves: pick one of the four algorithms, adjust limit/window/backend, send single requests or bursts, and watch the limiter's internal state change as requests are allowed or rejected.
+
+**Start RateGuard locally**, then open **[`http://localhost:8000/playground`](http://localhost:8000/playground)** (a local URL on your machine — nothing leaves it):
+
+```bash
+docker compose up --build
+```
+
+Any normal startup works the same way — e.g. `uvicorn app.main:app --reload`, then use [`http://127.0.0.1:8000/playground`](http://127.0.0.1:8000/playground).
 
 - **Simulation mode** drives the *actual* RateGuard algorithm implementations server-side (via the same factory the API uses) — the browser never re-implements rate limiting. Pick algorithm, limit, window, backend (Memory/Redis), client ID and route, then send single requests or bursts.
 - **Live API mode** sends real HTTP requests through the ASGI middleware and visualizes the genuine `X-RateLimit-*` / `Retry-After` headers, including real 429s. Optional API key is sent per request and never persisted.
