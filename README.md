@@ -2,12 +2,26 @@
 
 [![CI](https://github.com/snadeem03/ratelimiter_rategaurd/actions/workflows/ci.yml/badge.svg)](https://github.com/snadeem03/ratelimiter_rategaurd/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/snadeem03/ratelimiter_rategaurd)](https://github.com/snadeem03/ratelimiter_rategaurd/releases)
+[![Tests](https://img.shields.io/badge/tests-570%20passing-brightgreen)](#testing-and-ci)
 ![Python](https://img.shields.io/badge/python-3.12-blue?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-teal?logo=fastapi&logoColor=white)
 ![Redis](https://img.shields.io/badge/Redis-d82c20?logo=redis&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker%20compose-2496ED?logo=docker&logoColor=white)
 
-A distributed API rate-limiting service built with **FastAPI + Redis** — four pluggable algorithms, two backends, per-client and per-route limits, managed API keys, Prometheus metrics, and an interactive playground.
+RateGuard is a **rate-limiting service and library for Python APIs**, built on **FastAPI + Redis**: it enforces limits once at the API boundary inside true ASGI middleware, before requests reach your endpoints.
+
+**Current release:** [v1.2.0](https://github.com/snadeem03/ratelimiter_rategaurd/releases/tag/v1.2.0)
+
+**Key capabilities**
+
+- **4 rate-limiting algorithms** — fixed window, sliding window, token bucket, leaky bucket
+- **Memory & Redis backends** — single-process or shared state across workers and hosts
+- **True ASGI middleware** — a single enforcement point with standard `X-RateLimit-*` headers and `Retry-After`
+- **Dynamic distributed policies** — create/update/delete per-route limits at runtime through an admin API
+- **Policy audit history** — atomic, bounded change trail for every policy mutation
+- **Prometheus metrics** — `/metrics` endpoint plus a provisioned Grafana dashboard
+- **Interactive Playground** — browser UI at `/playground` that drives the real algorithm implementations
+- **Benchmark suite** — memory and Redis benchmarks across all four algorithms
 
 ## Contents
 
@@ -63,16 +77,33 @@ Also included:
 
 ```mermaid
 flowchart TD
-    C["Client"] --> MW["ASGI RateLimitMiddleware<br/><i>single enforcement point</i>"]
-    MW --> RES["Identity + route resolution<br/><i>X-API-Key / client IP · RATE_LIMIT_ROUTES</i>"]
-    RES --> FAC["RateLimiter facade<br/><i>per-(route, client) limiter instances</i>"]
-    FAC --> ALG["Algorithm<br/><i>fixed_window · sliding_window · token_bucket · leaky_bucket</i>"]
-    ALG -->|"memory"| MEM[("In-process state")]
-    ALG -->|"redis"| RED[("Redis<br/>atomic Lua scripts, server clock")]
-    MW -->|"allowed + X-RateLimit-*"| EP["FastAPI endpoint"]
+    subgraph HOT["Request path (hot path)"]
+        direction TB
+        C["Client"] --> MW["RateLimitMiddleware<br/><i>true ASGI middleware — single enforcement point</i>"]
+        MW --> ID["client identity<br/><i>managed API key · legacy X-API-Key · client IP</i>"]
+        ID --> FAC["RateLimiter facade<br/><i>per-(route, client) limiter instances</i>"]
+        FAC --> PR["PolicyResolver<br/><i>dynamic policies take precedence · short TTL cache</i>"]
+        PR --> ALG["selected algorithm<br/><i>fixed_window · sliding_window · token_bucket · leaky_bucket</i>"]
+        ALG -->|"memory"| MEM[("Memory<br/>in-process state")]
+        ALG -->|"redis"| RED[("Redis<br/>atomic Lua scripts · server clock")]
+    end
+
+    MW -->|"allowed + X-RateLimit-* headers"| EP["FastAPI endpoints"]
     MW -->|"over limit: 429 + Retry-After"| C
-    W1["uvicorn worker 1"] -.-> RED
-    W2["uvicorn worker 2"] -.-> RED
+
+    subgraph CTRL["Admin / control plane — NOT on the request hot path"]
+        direction TB
+        ADM["Admin API<br/><i>/admin/rate-limits · /admin/api-keys</i>"]
+        AUTH["admin authentication<br/><i>X-Admin-Token, constant-time compare</i>"]
+        PS["Policy Store<br/><i>dynamic distributed policies</i>"]
+        AS["Policy Audit Store<br/><i>bounded change history</i>"]
+        ADM --> AUTH --> PS --> AS
+    end
+
+    PS -.->|"policies feed the resolver"| PR
+    PROM["Prometheus<br/>GET /metrics<br/><i>exposed separately, never rate-limited</i>"]
+
+    style AS stroke-dasharray:4
 ```
 
 Excluded from limiting: `/`, `/docs`, `/redoc`, `/openapi.json`, `/metrics`, everything under `/admin/` and `/playground/`. Responses are streamed through untouched — the middleware merges headers without buffering bodies.
@@ -153,7 +184,15 @@ Admin endpoints require `X-Admin-Token` matching `ADMIN_API_TOKEN` (constant-tim
 
 ## Interactive playground
 
-Open **[`/playground`](http://localhost:8000/playground)** while the app is running. It's served by RateGuard itself — same origin, no CORS, nothing leaves your machine.
+The Playground is an interactive browser UI, served by RateGuard itself, for exploring how its rate limiting actually behaves: pick one of the four algorithms, adjust limit/window/backend, send single requests or bursts, and watch the limiter's internal state change as requests are allowed or rejected.
+
+**Start RateGuard locally**, then open **[`http://localhost:8000/playground`](http://localhost:8000/playground)** (a local URL on your machine — nothing leaves it):
+
+```bash
+docker compose up --build
+```
+
+Any normal startup works the same way — e.g. `uvicorn app.main:app --reload`, then use [`http://127.0.0.1:8000/playground`](http://127.0.0.1:8000/playground).
 
 - **Simulation mode** drives the *actual* RateGuard algorithm implementations server-side (via the same factory the API uses) — the browser never re-implements rate limiting. Pick algorithm, limit, window, backend (Memory/Redis), client ID and route, then send single requests or bursts.
 - **Live API mode** sends real HTTP requests through the ASGI middleware and visualizes the genuine `X-RateLimit-*` / `Retry-After` headers, including real 429s. Optional API key is sent per request and never persisted.
@@ -471,7 +510,20 @@ python -m benchmarks.run --all --requests 1000 --concurrency 10 --output benchma
 - Redis must be reachable for `--backend redis`; an unreachable server fails clearly instead of skipping or falling back.
 - Each run uses a unique key namespace (`rateguard:{algorithm}:bench:{run_id}`); only those keys are deleted afterwards.
 - `--output` writes a JSON report (timestamp, environment info, configuration, results). No file is created without it.
-- Results depend heavily on hardware, Python version, where Redis runs, and system load — they are measurements of your machine, not universal performance guarantees. This README intentionally contains no numbers; generate your own.
+- Results depend heavily on hardware, Python version, where Redis runs, and system load — they are measurements of your machine, not universal performance guarantees. Treat every number in this README (including the snapshot below) as one data point; generate your own.
+
+#### Benchmark snapshot
+
+Throughput (req/s) from a single verified run of the command above (`--all --requests 1000 --concurrency 1`, Python 3.14 · Windows 11 · Redis 8.2.7 · 8 cores). Bars are scaled within each backend panel — always compare values, not bar widths across panels:
+
+![Benchmark snapshot — throughput by algorithm and backend](docs/benchmark-throughput.svg)
+
+Numbers are environment-dependent measurements of one machine, not universal guarantees or production predictions. Regenerate the chart from your own run:
+
+```bash
+python -m benchmarks.run --all --requests 1000 --concurrency 1 --output benchmark-results.json
+python -m benchmarks.chart benchmark-results.json docs/benchmark-throughput.svg
+```
 
 ## Testing and CI
 

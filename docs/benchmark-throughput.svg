@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="434" viewBox="0 0 720 434" role="img" aria-label="RateGuard benchmark throughput by algorithm and backend">
+<rect width="720" height="434" fill="#0d1117"/>
+<text x="16" y="28" fill="#c9d1d9" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="600">Benchmark snapshot — throughput (req/s)</text>
+<text x="16" y="44" fill="#8b949e" font-family="Segoe UI, Arial, sans-serif" font-size="11">Python 3.14.6 · Windows 11 · Redis 8.2.7 · 8 cores</text>
+<text x="16" y="66" fill="#3fb950" font-family="Consolas, monospace" font-size="12" font-weight="700">MEMORY</text>
+<text x="16" y="112" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">fixed_window</text>
+<rect x="130" y="96" width="394" height="22" rx="3" fill="#3fb950"/>
+<text x="532" y="112" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">44,125.6</text>
+<text x="16" y="146" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">leaky_bucket</text>
+<rect x="130" y="130" width="434" height="22" rx="3" fill="#3fb950"/>
+<text x="572" y="146" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">48,577.2</text>
+<text x="16" y="180" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">sliding_window</text>
+<rect x="130" y="164" width="429" height="22" rx="3" fill="#3fb950"/>
+<text x="567" y="180" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">48,053.8</text>
+<text x="16" y="214" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">token_bucket</text>
+<rect x="130" y="198" width="480" height="22" rx="3" fill="#3fb950"/>
+<text x="618" y="214" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">53,784.0</text>
+<text x="16" y="234" fill="#58a6ff" font-family="Consolas, monospace" font-size="12" font-weight="700">REDIS</text>
+<text x="16" y="280" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">fixed_window</text>
+<rect x="130" y="264" width="463" height="22" rx="3" fill="#58a6ff"/>
+<text x="601" y="280" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">1,482.4</text>
+<text x="16" y="314" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">leaky_bucket</text>
+<rect x="130" y="298" width="476" height="22" rx="3" fill="#58a6ff"/>
+<text x="614" y="314" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">1,523.5</text>
+<text x="16" y="348" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">sliding_window</text>
+<rect x="130" y="332" width="468" height="22" rx="3" fill="#58a6ff"/>
+<text x="606" y="348" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">1,500.6</text>
+<text x="16" y="382" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">token_bucket</text>
+<rect x="130" y="366" width="480" height="22" rx="3" fill="#58a6ff"/>
+<text x="618" y="382" fill="#c9d1d9" font-family="Consolas, monospace" font-size="12">1,537.5</text>
+<text x="16" y="400" fill="#8b949e" font-family="Segoe UI, Arial, sans-serif" font-size="11">Bars are scaled within each backend panel; values are printed on each bar.</text>
+<text x="16" y="418" fill="#8b949e" font-family="Segoe UI, Arial, sans-serif" font-size="11">Results are environment-dependent — measurements of one machine, not universal guarantees.</text>
+</svg>
