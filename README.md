@@ -485,7 +485,20 @@ python -m benchmarks.run --all --requests 1000 --concurrency 10 --output benchma
 - Redis must be reachable for `--backend redis`; an unreachable server fails clearly instead of skipping or falling back.
 - Each run uses a unique key namespace (`rateguard:{algorithm}:bench:{run_id}`); only those keys are deleted afterwards.
 - `--output` writes a JSON report (timestamp, environment info, configuration, results). No file is created without it.
-- Results depend heavily on hardware, Python version, where Redis runs, and system load — they are measurements of your machine, not universal performance guarantees. This README intentionally contains no numbers; generate your own.
+- Results depend heavily on hardware, Python version, where Redis runs, and system load — they are measurements of your machine, not universal performance guarantees. Treat every number in this README (including the snapshot below) as one data point; generate your own.
+
+#### Benchmark snapshot
+
+Throughput (req/s) from a single verified run of the command above (`--all --requests 1000 --concurrency 1`, Python 3.14 · Windows 11 · Redis 8.2.7 · 8 cores). Bars are scaled within each backend panel — always compare values, not bar widths across panels:
+
+![Benchmark snapshot — throughput by algorithm and backend](docs/benchmark-throughput.svg)
+
+Numbers are environment-dependent measurements of one machine, not universal guarantees or production predictions. Regenerate the chart from your own run:
+
+```bash
+python -m benchmarks.run --all --requests 1000 --concurrency 1 --output benchmark-results.json
+python -m benchmarks.chart benchmark-results.json docs/benchmark-throughput.svg
+```
 
 ## Testing and CI
 
