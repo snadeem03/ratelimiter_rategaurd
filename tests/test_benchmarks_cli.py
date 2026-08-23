@@ -116,12 +116,12 @@ class TestAllFlag:
 
 
 class TestMain:
-    def test_main_prints_plan_and_exits_zero(self, capsys):
+    def test_default_invocation_executes_single_scenario(self, capsys):
         assert main([]) == 0
         out = capsys.readouterr().out
-        assert "Scenarios: 1" in out
-        assert "memory / sliding_window" in out
-        assert "Execution is not implemented yet." in out
+        assert "Backend: memory" in out
+        assert "Algorithm: sliding_window" in out
+        assert "Requests: 1000" in out
 
     def test_invalid_args_exit_with_code_two(self, capsys):
         with pytest.raises(SystemExit) as excinfo:

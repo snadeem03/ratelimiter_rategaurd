@@ -2,6 +2,8 @@
 
 import argparse
 
+from benchmarks.runner import SUPPORTED_BACKENDS, run_scenario
+
 BACKENDS = ["memory", "redis"]
 ALGORITHMS = ["fixed_window", "sliding_window", "token_bucket", "leaky_bucket"]
 
@@ -88,13 +90,31 @@ def main(argv=None) -> int:
         for message in errors:
             parser.error(message)
     plan = resolve_plan(args)
-    print(f"Scenarios: {len(plan['scenarios'])}")
-    for scenario in plan["scenarios"]:
+    if len(plan["scenarios"]) > 1:
+        print("--all execution is not implemented yet.")
+        return 0
+    scenario = plan["scenarios"][0]
+    if scenario["backend"] not in SUPPORTED_BACKENDS:
         print(
-            f"  {scenario['backend']:>6} / {scenario['algorithm']:<14}"
-            f" requests={plan['requests']} concurrency={plan['concurrency']}"
+            f"{scenario['backend']} benchmarking is not implemented yet."
         )
-    print("Execution is not implemented yet.")
+        return 0
+    result = run_scenario(
+        backend=scenario["backend"],
+        algorithm=scenario["algorithm"],
+        requests=plan["requests"],
+        concurrency=plan["concurrency"],
+    )
+    print(f"Backend: {result['backend']}")
+    print(f"Algorithm: {result['algorithm']}")
+    print(f"Requests: {result['requests']}")
+    print(f"Allowed: {result['allowed']}")
+    print(f"Rejected: {result['rejected']}")
+    print(f"Throughput: {result['throughput_rps']:.1f} req/s")
+    print(f"Average latency: {result['avg_ms']:.3f} ms")
+    print(f"P50: {result['p50_ms']:.3f} ms")
+    print(f"P95: {result['p95_ms']:.3f} ms")
+    print(f"P99: {result['p99_ms']:.3f} ms")
     return 0
 
 
