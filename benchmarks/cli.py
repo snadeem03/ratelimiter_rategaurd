@@ -2,6 +2,7 @@
 
 import argparse
 
+from benchmarks.matrix import render_table, run_matrix
 from benchmarks.redis_backend import RedisUnavailableError
 from benchmarks.runner import run_scenario
 
@@ -92,7 +93,18 @@ def main(argv=None) -> int:
             parser.error(message)
     plan = resolve_plan(args)
     if len(plan["scenarios"]) > 1:
-        print("--all execution is not implemented yet.")
+        results, failure = run_matrix(
+            plan["scenarios"], plan["requests"], plan["concurrency"]
+        )
+        if results:
+            print(render_table(results))
+        if failure is not None:
+            scenario, exc = failure
+            print(
+                f"ERROR: {scenario['backend']}/{scenario['algorithm']}: "
+                f"{exc}"
+            )
+            return 1
         return 0
     scenario = plan["scenarios"][0]
     try:

@@ -170,8 +170,11 @@ class TestCliExecution:
         assert "ERROR:" in out
         assert "not reachable" in out
 
-    def test_all_execution_still_deferred(self, capsys):
-        exit_code = main(["--all"])
+    def test_all_executes_full_matrix_with_table_output(self, capsys):
+        exit_code = main(["--all", "--requests", "20", "--concurrency", "1"])
         out = capsys.readouterr().out
         assert exit_code == 0
-        assert "--all execution is not implemented yet." in out
+        assert "Algorithm" in out and "Backend" in out
+        assert out.count("memory") == 4
+        assert out.count("redis") == 4
+        assert "ERROR:" not in out
