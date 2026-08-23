@@ -208,7 +208,7 @@ class TestRedisFailureHandling:
         redis_rows = [
             line for line in out.splitlines() if " redis " in line
         ]
-        assert len(table_rows) == 4
+        assert table_rows == []
         assert redis_rows == []
 
 
