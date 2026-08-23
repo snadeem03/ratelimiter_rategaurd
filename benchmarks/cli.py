@@ -2,7 +2,8 @@
 
 import argparse
 
-from benchmarks.runner import SUPPORTED_BACKENDS, run_scenario
+from benchmarks.redis_backend import RedisUnavailableError
+from benchmarks.runner import run_scenario
 
 BACKENDS = ["memory", "redis"]
 ALGORITHMS = ["fixed_window", "sliding_window", "token_bucket", "leaky_bucket"]
@@ -94,17 +95,16 @@ def main(argv=None) -> int:
         print("--all execution is not implemented yet.")
         return 0
     scenario = plan["scenarios"][0]
-    if scenario["backend"] not in SUPPORTED_BACKENDS:
-        print(
-            f"{scenario['backend']} benchmarking is not implemented yet."
+    try:
+        result = run_scenario(
+            backend=scenario["backend"],
+            algorithm=scenario["algorithm"],
+            requests=plan["requests"],
+            concurrency=plan["concurrency"],
         )
-        return 0
-    result = run_scenario(
-        backend=scenario["backend"],
-        algorithm=scenario["algorithm"],
-        requests=plan["requests"],
-        concurrency=plan["concurrency"],
-    )
+    except RedisUnavailableError as exc:
+        print(f"ERROR: {exc}")
+        return 1
     print(f"Backend: {result['backend']}")
     print(f"Algorithm: {result['algorithm']}")
     print(f"Requests: {result['requests']}")

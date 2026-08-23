@@ -130,9 +130,9 @@ class TestRunScenario:
 
 
 class TestUnsupportedBackend:
-    def test_runner_rejects_redis(self):
+    def test_runner_rejects_unknown_backends(self):
         with pytest.raises(NotImplementedError, match="not implemented"):
-            run_scenario("redis", "token_bucket", 10, 1)
+            run_scenario("memcached", "token_bucket", 10, 1)
 
 
 class TestCliExecution:
@@ -155,12 +155,20 @@ class TestCliExecution:
         assert "P95: " in out
         assert "P99: " in out
 
-    def test_redis_reports_not_implemented_and_exits_cleanly(self, capsys):
+    def test_redis_unavailable_fails_clearly_with_nonzero_exit(
+        self, capsys, monkeypatch
+    ):
+        from benchmarks.redis_backend import RedisUnavailableError
+
+        def fail(*args, **kwargs):
+            raise RedisUnavailableError("Redis is not reachable; ...")
+
+        monkeypatch.setattr("benchmarks.cli.run_scenario", fail)
         exit_code = main(["--backend", "redis"])
         out = capsys.readouterr().out
-        assert exit_code == 0
-        assert "redis benchmarking is not implemented yet." in out.lower()
-        assert "Traceback" not in out
+        assert exit_code == 1
+        assert "ERROR:" in out
+        assert "not reachable" in out
 
     def test_all_execution_still_deferred(self, capsys):
         exit_code = main(["--all"])

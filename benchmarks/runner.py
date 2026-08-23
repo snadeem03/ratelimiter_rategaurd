@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from app.algorithms.factory import create_rate_limiter
 from benchmarks.metrics import latency_summary_ms
 
-SUPPORTED_BACKENDS = ["memory"]
+SUPPORTED_BACKENDS = ["memory", "redis"]
 DEFAULT_LIMIT = 100
 DEFAULT_WINDOW = 60
 
@@ -17,13 +17,7 @@ def build_limiter(algorithm: str, limit: int = DEFAULT_LIMIT,
     return create_rate_limiter(algorithm, limit=limit, window=window)
 
 
-def run_scenario(backend: str, algorithm: str, requests: int,
-                 concurrency: int) -> dict:
-    if backend not in SUPPORTED_BACKENDS:
-        raise NotImplementedError(
-            f"{backend} benchmarking is not implemented yet"
-        )
-    limiter = build_limiter(algorithm)
+def execute_requests(limiter, requests: int, concurrency: int) -> dict:
     samples_ms = []
     allowed = 0
     rejected = 0
@@ -49,8 +43,6 @@ def run_scenario(backend: str, algorithm: str, requests: int,
 
     summary = latency_summary_ms(samples_ms)
     return {
-        "backend": backend,
-        "algorithm": algorithm,
         "requests": requests,
         "concurrency": concurrency,
         "elapsed_s": elapsed_s,
@@ -58,4 +50,26 @@ def run_scenario(backend: str, algorithm: str, requests: int,
         "rejected": rejected,
         "throughput_rps": requests / elapsed_s if elapsed_s > 0 else 0.0,
         **summary,
+    }
+
+
+def run_scenario(backend: str, algorithm: str, requests: int,
+                 concurrency: int) -> dict:
+    if backend == "redis":
+        from benchmarks.redis_backend import run_redis_scenario
+
+        return run_redis_scenario(
+            algorithm=algorithm,
+            requests=requests,
+            concurrency=concurrency,
+        )
+    if backend != "memory":
+        raise NotImplementedError(
+            f"{backend} benchmarking is not implemented yet"
+        )
+    result = execute_requests(build_limiter(algorithm), requests, concurrency)
+    return {
+        "backend": backend,
+        "algorithm": algorithm,
+        **result,
     }
