@@ -77,16 +77,33 @@ Also included:
 
 ```mermaid
 flowchart TD
-    C["Client"] --> MW["ASGI RateLimitMiddleware<br/><i>single enforcement point</i>"]
-    MW --> RES["Identity + route resolution<br/><i>X-API-Key / client IP · RATE_LIMIT_ROUTES</i>"]
-    RES --> FAC["RateLimiter facade<br/><i>per-(route, client) limiter instances</i>"]
-    FAC --> ALG["Algorithm<br/><i>fixed_window · sliding_window · token_bucket · leaky_bucket</i>"]
-    ALG -->|"memory"| MEM[("In-process state")]
-    ALG -->|"redis"| RED[("Redis<br/>atomic Lua scripts, server clock")]
-    MW -->|"allowed + X-RateLimit-*"| EP["FastAPI endpoint"]
+    subgraph HOT["Request path (hot path)"]
+        direction TB
+        C["Client"] --> MW["RateLimitMiddleware<br/><i>true ASGI middleware — single enforcement point</i>"]
+        MW --> ID["client identity<br/><i>managed API key · legacy X-API-Key · client IP</i>"]
+        ID --> FAC["RateLimiter facade<br/><i>per-(route, client) limiter instances</i>"]
+        FAC --> PR["PolicyResolver<br/><i>dynamic policies take precedence · short TTL cache</i>"]
+        PR --> ALG["selected algorithm<br/><i>fixed_window · sliding_window · token_bucket · leaky_bucket</i>"]
+        ALG -->|"memory"| MEM[("Memory<br/>in-process state")]
+        ALG -->|"redis"| RED[("Redis<br/>atomic Lua scripts · server clock")]
+    end
+
+    MW -->|"allowed + X-RateLimit-* headers"| EP["FastAPI endpoints"]
     MW -->|"over limit: 429 + Retry-After"| C
-    W1["uvicorn worker 1"] -.-> RED
-    W2["uvicorn worker 2"] -.-> RED
+
+    subgraph CTRL["Admin / control plane — NOT on the request hot path"]
+        direction TB
+        ADM["Admin API<br/><i>/admin/rate-limits · /admin/api-keys</i>"]
+        AUTH["admin authentication<br/><i>X-Admin-Token, constant-time compare</i>"]
+        PS["Policy Store<br/><i>dynamic distributed policies</i>"]
+        AS["Policy Audit Store<br/><i>bounded change history</i>"]
+        ADM --> AUTH --> PS --> AS
+    end
+
+    PS -.->|"policies feed the resolver"| PR
+    PROM["Prometheus<br/>GET /metrics<br/><i>exposed separately, never rate-limited</i>"]
+
+    style AS stroke-dasharray:4
 ```
 
 Excluded from limiting: `/`, `/docs`, `/redoc`, `/openapi.json`, `/metrics`, everything under `/admin/` and `/playground/`. Responses are streamed through untouched — the middleware merges headers without buffering bodies.
