@@ -458,6 +458,21 @@ python -m benchmark.benchmark --backend redis --algorithm token_bucket \
 
 Numbers depend heavily on hardware and topology, so this README deliberately publishes none — run it yourself.
 
+### v1.2 benchmark suite (`benchmarks/`)
+
+A leaner matrix runner over the same real limiter implementations. All **four algorithms** are benchmarked against the **memory** and **Redis** backends (8 scenarios total), sequentially, with per-request `perf_counter()` timing:
+
+```bash
+python -m benchmarks.run --backend memory --algorithm token_bucket --requests 1000 --concurrency 1
+python -m benchmarks.run --all --requests 1000 --concurrency 10
+python -m benchmarks.run --all --requests 1000 --concurrency 10 --output benchmark-results.json
+```
+
+- Redis must be reachable for `--backend redis`; an unreachable server fails clearly instead of skipping or falling back.
+- Each run uses a unique key namespace (`rateguard:{algorithm}:bench:{run_id}`); only those keys are deleted afterwards.
+- `--output` writes a JSON report (timestamp, environment info, configuration, results). No file is created without it.
+- Results depend heavily on hardware, Python version, where Redis runs, and system load — they are measurements of your machine, not universal performance guarantees. This README intentionally contains no numbers; generate your own.
+
 ## Testing and CI
 
 ```bash
