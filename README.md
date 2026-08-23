@@ -2,12 +2,26 @@
 
 [![CI](https://github.com/snadeem03/ratelimiter_rategaurd/actions/workflows/ci.yml/badge.svg)](https://github.com/snadeem03/ratelimiter_rategaurd/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/snadeem03/ratelimiter_rategaurd)](https://github.com/snadeem03/ratelimiter_rategaurd/releases)
+[![Tests](https://img.shields.io/badge/tests-564%20passing-brightgreen)](#testing-and-ci)
 ![Python](https://img.shields.io/badge/python-3.12-blue?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-teal?logo=fastapi&logoColor=white)
 ![Redis](https://img.shields.io/badge/Redis-d82c20?logo=redis&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker%20compose-2496ED?logo=docker&logoColor=white)
 
-A distributed API rate-limiting service built with **FastAPI + Redis** — four pluggable algorithms, two backends, per-client and per-route limits, managed API keys, Prometheus metrics, and an interactive playground.
+RateGuard is a **rate-limiting service and library for Python APIs**, built on **FastAPI + Redis**: it enforces limits once at the API boundary inside true ASGI middleware, before requests reach your endpoints.
+
+**Current release:** [v1.2.0](https://github.com/snadeem03/ratelimiter_rategaurd/releases/tag/v1.2.0)
+
+**Key capabilities**
+
+- **4 rate-limiting algorithms** — fixed window, sliding window, token bucket, leaky bucket
+- **Memory & Redis backends** — single-process or shared state across workers and hosts
+- **True ASGI middleware** — a single enforcement point with standard `X-RateLimit-*` headers and `Retry-After`
+- **Dynamic distributed policies** — create/update/delete per-route limits at runtime through an admin API
+- **Policy audit history** — atomic, bounded change trail for every policy mutation
+- **Prometheus metrics** — `/metrics` endpoint plus a provisioned Grafana dashboard
+- **Interactive Playground** — browser UI at `/playground` that drives the real algorithm implementations
+- **Benchmark suite** — memory and Redis benchmarks across all four algorithms
 
 ## Contents
 
